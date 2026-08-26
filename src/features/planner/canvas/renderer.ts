@@ -45,7 +45,6 @@ const COLORS = {
   previewBorderValid: '#88ff88',
   previewBorderInvalid: '#ff4444',
   structureBorder: 'rgba(255, 255, 255, 0.3)',
-  structureBorderAccess: 'rgba(255, 255, 255, 0.1)', // Lighter border for access tiles
   structureText: '#ffffff',
   structureTextShadow: '#000000',
   hullTile: '#3a4a5c',
@@ -60,12 +59,44 @@ const COLORS = {
   selectionEraseBorder: 'rgba(255, 68, 68, 0.85)',
   selectionHullPlaceFill: 'rgba(74, 90, 108, 0.35)',
   selectionHullEraseFill: 'rgba(180, 60, 60, 0.25)',
-  // Tile type colors (for detailed structure rendering)
-  // Construction tiles: use full structure color (solid object)
-  // Access tiles: semi-transparent, can overlap (crew access area)
-  // Blocked tiles: red overlay (impassable)
-  accessTileOpacity: 0.25, // Access tiles are more transparent
-  blockedTileOverlay: 'rgba(180, 60, 60, 0.5)', // Red overlay for blocked
+  // Tile semantics should be category-independent so orientation is obvious.
+  // Red is intentionally reserved for invalid placement / destructive actions.
+  accessTileFill: 'rgba(64, 196, 230, 0.38)',
+  accessTileBorder: 'rgba(112, 224, 255, 0.95)',
+  accessTileMark: 'rgba(180, 242, 255, 0.9)',
+  blockedTileFill: 'rgba(220, 164, 58, 0.52)',
+  blockedTileBorder: 'rgba(246, 199, 92, 0.95)',
+}
+
+/**
+ * The stock catalog uses red for both system and weapon categories. Those colors
+ * compete with validation/error feedback, so use calmer display colors while
+ * keeping the catalog data itself unchanged.
+ */
+const DISPLAY_COLOR_OVERRIDES: Readonly<Record<string, string>> = {
+  '#cc4444': '#5477b8',
+  '#cc4466': '#8a67b0',
+}
+
+function getDisplayColor(color: string): string {
+  return DISPLAY_COLOR_OVERRIDES[color.toLowerCase()] ?? color
+}
+
+function renderAccessTileIndicator(
+  ctx: CanvasRenderingContext2D,
+  tileX: number,
+  tileY: number,
+  zoom: number
+): void {
+  if (zoom < 7) return
+
+  const inset = Math.max(2, zoom * 0.2)
+  ctx.strokeStyle = COLORS.accessTileMark
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(tileX + inset, tileY + zoom - inset)
+  ctx.lineTo(tileX + zoom - inset, tileY + inset)
+  ctx.stroke()
 }
 
 export interface RenderContext {
@@ -267,9 +298,9 @@ function hslToHsla(color: string, alpha: number): string {
  * Render a single placed structure
  *
  * Tile types are rendered differently:
- * - Construction: Solid color (the actual structure)
- * - Access: Semi-transparent (crew can walk here, can overlap with other access)
- * - Blocked: Red overlay (impassable)
+ * - Construction: solid category color (the actual structure)
+ * - Access: cyan marked tile (crew can walk here, can overlap with other access)
+ * - Blocked: amber (impassable footprint)
  *
  * @param renderedAccessTiles - Set of already rendered access tile keys to prevent double-rendering
  */
@@ -284,6 +315,7 @@ export function renderStructure(
 
   const { ctx, zoom } = rc
   const structureDef = found.structure
+  const structureColor = getDisplayColor(structureDef.color)
   const [width, height] = getRotatedSize(structureDef.size, structure.rotation)
 
   const baseX = structure.x * zoom
@@ -315,29 +347,25 @@ export function renderStructure(
         // Mark this access tile as rendered
         renderedAccessTiles?.add(tileKey)
 
-        // Access tiles: semi-transparent, with dashed border
-        // These represent areas where crew can walk/access the structure
-        ctx.fillStyle = hslToHsla(structureDef.color, COLORS.accessTileOpacity)
+        ctx.fillStyle = COLORS.accessTileFill
         ctx.fillRect(tileX, tileY, zoom, zoom)
 
-        // Dashed border for access tiles
         ctx.setLineDash([2, 2])
-        ctx.strokeStyle = COLORS.structureBorderAccess
+        ctx.strokeStyle = COLORS.accessTileBorder
         ctx.lineWidth = 1
         ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
         ctx.setLineDash([])
+        renderAccessTileIndicator(ctx, tileX, tileY, zoom)
       } else if (tile.type === 'blocked') {
-        // Blocked tiles: solid red color (space/impassable areas)
-        ctx.fillStyle = 'rgba(140, 50, 50, 0.9)'
+        ctx.fillStyle = COLORS.blockedTileFill
         ctx.fillRect(tileX, tileY, zoom, zoom)
 
-        // Red border for blocked
-        ctx.strokeStyle = 'rgba(180, 60, 60, 1)'
+        ctx.strokeStyle = COLORS.blockedTileBorder
         ctx.lineWidth = 1
         ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
       } else {
         // Construction tiles: solid color (the actual structure)
-        ctx.fillStyle = structureDef.color
+        ctx.fillStyle = structureColor
         ctx.fillRect(tileX, tileY, zoom, zoom)
 
         // Solid border
@@ -348,7 +376,7 @@ export function renderStructure(
     }
   } else {
     // Fallback: render as solid rectangle (old behavior)
-    ctx.fillStyle = structureDef.color
+    ctx.fillStyle = structureColor
     ctx.fillRect(baseX, baseY, w, h)
 
     // Border
@@ -659,11 +687,13 @@ export function renderSelectionOverlay(rc: RenderContext, overlay: SelectionOver
  *
  * Shows:
  * - Construction tiles: structure color (what you're placing)
- * - Blocked tiles: red (areas that will be blocked)
- * - Access tiles: lighter/transparent (areas that remain accessible)
+ * - Blocked tiles: amber (impassable footprint)
+ * - Access tiles: cyan marked tiles (walkable and overlap-compatible)
+ * - Invalid placement: red outer border
  */
 export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
   const { ctx, zoom } = rc
+  const structureColor = getDisplayColor(preview.color)
 
   // If we have tile layout, render tile-by-tile
   if (preview.tileLayout && preview.tileLayout.tiles.length > 0) {
@@ -688,36 +718,32 @@ export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
       const tileX = (preview.x + rotatedPos.x) * zoom
       const tileY = (preview.y + rotatedPos.y) * zoom
 
-      // Choose color based on tile type
+      // Keep tile semantics visible even when the placement is invalid. The outer
+      // preview border communicates validity without hiding orientation details.
       if (tile.type === 'construction') {
-        // Construction: structure color with preview transparency
-        ctx.fillStyle = preview.isValid ? hslToHsla(preview.color, 0.6) : COLORS.previewInvalid
+        ctx.fillStyle = hslToHsla(structureColor, 0.6)
         ctx.fillRect(tileX, tileY, zoom, zoom)
 
-        // Solid border for construction tiles
-        ctx.strokeStyle = preview.isValid ? COLORS.previewBorderValid : COLORS.previewBorderInvalid
+        ctx.strokeStyle = COLORS.structureBorder
         ctx.lineWidth = 1
         ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
       } else if (tile.type === 'blocked') {
-        // Blocked: red color (areas that will be blocked)
-        ctx.fillStyle = 'rgba(180, 60, 60, 0.5)'
+        ctx.fillStyle = COLORS.blockedTileFill
         ctx.fillRect(tileX, tileY, zoom, zoom)
 
-        // Red border for blocked tiles
-        ctx.strokeStyle = '#aa4444'
+        ctx.strokeStyle = COLORS.blockedTileBorder
         ctx.lineWidth = 1
         ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
       } else {
-        // Access: lighter transparent (areas that remain accessible)
-        ctx.fillStyle = preview.isValid ? hslToHsla(preview.color, 0.2) : 'rgba(255, 68, 68, 0.2)'
+        ctx.fillStyle = COLORS.accessTileFill
         ctx.fillRect(tileX, tileY, zoom, zoom)
 
-        // Dashed border for access tiles
         ctx.setLineDash([2, 2])
-        ctx.strokeStyle = preview.isValid ? 'rgba(255, 255, 255, 0.3)' : 'rgba(255, 68, 68, 0.3)'
+        ctx.strokeStyle = COLORS.accessTileBorder
         ctx.lineWidth = 1
         ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
         ctx.setLineDash([])
+        renderAccessTileIndicator(ctx, tileX, tileY, zoom)
       }
     }
 
@@ -739,7 +765,7 @@ export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
     const w = preview.width * zoom
     const h = preview.height * zoom
 
-    ctx.fillStyle = preview.isValid ? preview.color + '88' : COLORS.previewInvalid
+    ctx.fillStyle = preview.isValid ? structureColor + '88' : COLORS.previewInvalid
     ctx.fillRect(x, y, w, h)
 
     ctx.setLineDash([4, 4])
