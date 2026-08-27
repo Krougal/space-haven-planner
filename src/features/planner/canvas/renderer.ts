@@ -75,6 +75,8 @@ const COLORS = {
   wallTileFill: 'rgba(104, 118, 134, 0.92)',
   wallTileBorder: 'rgba(222, 228, 236, 0.72)',
   wallTileMark: 'rgba(238, 242, 248, 0.48)',
+  doorMark: 'rgba(238, 204, 142, 0.95)',
+  windowMark: 'rgba(132, 218, 242, 0.95)',
 
   // Amber is reserved for exterior/reserved clearance around airlocks, engines,
   // hyperdrives and cargo docking structures.
@@ -179,6 +181,93 @@ function renderExclusionTileIndicator(
   ctx.moveTo(tileX + inset + gap, tileY + zoom - inset)
   ctx.lineTo(tileX + zoom - inset, tileY + inset + gap)
   ctx.stroke()
+}
+
+type WallVisualKind = 'wall' | 'door' | 'window'
+
+function getWallVisualKind(structureDef: StructureDef): WallVisualKind | null {
+  if (structureDef.categoryId !== 'wall') return null
+
+  const name = structureDef.name.toLowerCase()
+  if (name.includes('window')) return 'window'
+  if (name.includes('door')) return 'door'
+  return 'wall'
+}
+
+/**
+ * Add a simple deterministic symbol over wall-family pieces so doors and windows
+ * remain recognizable without requiring external icon assets. The symbol follows
+ * the piece rotation.
+ */
+function renderWallFixtureOverlay(
+  ctx: CanvasRenderingContext2D,
+  structureDef: StructureDef,
+  rotation: Rotation,
+  baseX: number,
+  baseY: number,
+  widthPx: number,
+  heightPx: number,
+  zoom: number
+): void {
+  const kind = getWallVisualKind(structureDef)
+  if (!kind || kind === 'wall' || zoom < 7) return
+
+  const horizontal = rotation === 0 || rotation === 180
+  const centerX = baseX + widthPx / 2
+  const centerY = baseY + heightPx / 2
+  const inset = Math.max(2, zoom * 0.18)
+
+  ctx.save()
+  ctx.lineWidth = Math.max(1.5, zoom * 0.13)
+  ctx.lineCap = 'round'
+
+  if (kind === 'window') {
+    ctx.strokeStyle = COLORS.windowMark
+    const separation = Math.max(2, zoom * 0.18)
+    ctx.beginPath()
+    if (horizontal) {
+      ctx.moveTo(baseX + inset, centerY - separation / 2)
+      ctx.lineTo(baseX + widthPx - inset, centerY - separation / 2)
+      ctx.moveTo(baseX + inset, centerY + separation / 2)
+      ctx.lineTo(baseX + widthPx - inset, centerY + separation / 2)
+    } else {
+      ctx.moveTo(centerX - separation / 2, baseY + inset)
+      ctx.lineTo(centerX - separation / 2, baseY + heightPx - inset)
+      ctx.moveTo(centerX + separation / 2, baseY + inset)
+      ctx.lineTo(centerX + separation / 2, baseY + heightPx - inset)
+    }
+    ctx.stroke()
+  } else {
+    ctx.strokeStyle = COLORS.doorMark
+    const gap = Math.max(2, zoom * 0.22)
+    ctx.beginPath()
+    if (horizontal) {
+      ctx.moveTo(baseX + inset, centerY)
+      ctx.lineTo(centerX - gap, centerY)
+      ctx.moveTo(centerX + gap, centerY)
+      ctx.lineTo(baseX + widthPx - inset, centerY)
+    } else {
+      ctx.moveTo(centerX, baseY + inset)
+      ctx.lineTo(centerX, centerY - gap)
+      ctx.moveTo(centerX, centerY + gap)
+      ctx.lineTo(centerX, baseY + heightPx - inset)
+    }
+    ctx.stroke()
+
+    // Small handle/datum mark makes doors distinguishable from a generic divider.
+    ctx.fillStyle = COLORS.doorMark
+    ctx.beginPath()
+    ctx.arc(
+      horizontal ? centerX + gap * 0.55 : centerX + Math.max(1.5, zoom * 0.09),
+      horizontal ? centerY - Math.max(1.5, zoom * 0.09) : centerY + gap * 0.55,
+      Math.max(1, zoom * 0.07),
+      0,
+      Math.PI * 2
+    )
+    ctx.fill()
+  }
+
+  ctx.restore()
 }
 
 /**
@@ -358,6 +447,7 @@ function rotateTilePosition(
  * - Access: category-color tint + slash
  * - Blocked machine body: category-color tint + X
  * - Wall category: distinct neutral wall tile
+ * - Doors/windows: wall base plus a unique rotation-aware overlay
  * - Exterior exclusion: amber hazard marking
  */
 export function renderStructure(
@@ -443,6 +533,8 @@ export function renderStructure(
     ctx.lineWidth = 1
     ctx.strokeRect(baseX + 0.5, baseY + 0.5, w - 1, h - 1)
   }
+
+  renderWallFixtureOverlay(ctx, structureDef, structure.rotation, baseX, baseY, w, h, zoom)
 
   const hullRelatedNames = ['wall', 'door', 'window', 'hull']
   const isHullRelated = hullRelatedNames.some((name) =>
