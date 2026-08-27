@@ -221,18 +221,44 @@ function rotateTilePosition(
 }
 
 /**
- * Get all tiles for a structure at a position, categorized by type
- * Returns both blocking tiles (construction/blocked) and access tiles separately
+ * The current JAR catalog flattens exterior Space restrictions into `blocked`
+ * tiles. For the structures that expose those amber exterior-clearance regions,
+ * treat their blocked tiles as exclusion rather than solid structure body.
+ */
+function usesExteriorExclusionStyle(structureDef: StructureDef): boolean {
+  const name = structureDef.name.toLowerCase()
+  return (
+    structureDef.categoryId === 'airlock' ||
+    name.includes('airlock') ||
+    name.includes('cargo dock') ||
+    name.includes('cargo port') ||
+    name.includes('engine') ||
+    name.includes('hyperdrive') ||
+    name.includes('thruster')
+  )
+}
+
+/**
+ * Get all tiles for a structure at a position, categorized by collision role.
+ * Exterior exclusion tiles may overlap each other, but remain incompatible with
+ * solid structure or access tiles.
  */
 function getStructureTiles(
   structureDef: StructureDef,
   structX: number,
   structY: number,
   rotation: Rotation
-): { blocking: Set<string>; access: Set<string>; all: Set<string> } {
+): {
+  blocking: Set<string>
+  access: Set<string>
+  exclusion: Set<string>
+  all: Set<string>
+} {
   const blocking = new Set<string>()
   const access = new Set<string>()
+  const exclusion = new Set<string>()
   const all = new Set<string>()
+  const exteriorExclusion = usesExteriorExclusionStyle(structureDef)
 
   if (structureDef.tileLayout && structureDef.tileLayout.tiles.length > 0) {
     const { tiles, width: layoutWidth, height: layoutHeight } = structureDef.tileLayout
@@ -246,6 +272,8 @@ function getStructureTiles(
       all.add(key)
       if (tile.type === 'access') {
         access.add(key)
+      } else if (tile.type === 'blocked' && exteriorExclusion) {
+        exclusion.add(key)
       } else {
         blocking.add(key)
       }
@@ -262,15 +290,16 @@ function getStructureTiles(
     }
   }
 
-  return { blocking, access, all }
+  return { blocking, access, exclusion, all }
 }
 
 /**
- * Check if a structure at given position overlaps with existing structures
+ * Check if a structure at given position overlaps with existing structures.
  *
  * Collision rules:
- * - Blocking tiles (construction/blocked) CANNOT overlap with ANY tile of existing structures
- * - Access tiles CAN overlap with other access tiles only
+ * - Solid/blocking tiles cannot overlap any existing structure tile.
+ * - Access tiles can overlap access tiles only.
+ * - Exterior exclusion tiles can overlap exterior exclusion tiles only.
  */
 function hasCollision(
   state: PlannerState,
@@ -280,35 +309,37 @@ function hasCollision(
   rotation: Rotation,
   excludeId?: string
 ): boolean {
-  // Get tiles for the new structure
   const newTiles = getStructureTiles(structureDef, x, y, rotation)
 
-  // If no tiles at all, no collision possible
   if (newTiles.all.size === 0) {
     return false
   }
 
-  // Check against each existing structure
   for (const struct of state.structures) {
     if (excludeId && struct.id === excludeId) continue
 
     const found = findStructureById(state.catalog, struct.structureId)
     if (!found) continue
 
-    // Get tiles for the existing structure
     const existingTiles = getStructureTiles(found.structure, struct.x, struct.y, struct.rotation)
 
-    // Rule 1: New blocking tiles cannot overlap with ANY existing tile
+    // Solid body cannot overlap anything, including another structure's exclusion zone.
     for (const tileKey of newTiles.blocking) {
       if (existingTiles.all.has(tileKey)) {
         return true
       }
     }
 
-    // Rule 2: New access tiles cannot overlap with existing blocking tiles
-    // (but CAN overlap with existing access tiles)
+    // Access may overlap access only.
     for (const tileKey of newTiles.access) {
-      if (existingTiles.blocking.has(tileKey)) {
+      if (existingTiles.blocking.has(tileKey) || existingTiles.exclusion.has(tileKey)) {
+        return true
+      }
+    }
+
+    // Exterior exclusion may overlap exterior exclusion only.
+    for (const tileKey of newTiles.exclusion) {
+      if (existingTiles.blocking.has(tileKey) || existingTiles.access.has(tileKey)) {
         return true
       }
     }
