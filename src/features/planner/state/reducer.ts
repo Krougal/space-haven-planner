@@ -1026,11 +1026,29 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
 
     case 'MOVE_SELECTED_STRUCTURES': {
       if (state.selectedStructureIds.size === 0) return state
-      const { deltaX, deltaY } = action
-      if (deltaX === 0 && deltaY === 0) return state
 
-      // Validate move for all selected structures before applying
-      // All structures must be able to move to their new positions
+      const { deltaX, deltaY, rotation } = action
+      const isSingleSelection = state.selectedStructureIds.size === 1
+      const selectedStructure = isSingleSelection
+        ? state.structures.find((s) => state.selectedStructureIds.has(s.id))
+        : undefined
+      const targetSingleRotation =
+        isSingleSelection && rotation !== undefined ? rotation : selectedStructure?.rotation
+      const rotationChanged =
+        isSingleSelection &&
+        selectedStructure !== undefined &&
+        targetSingleRotation !== undefined &&
+        targetSingleRotation !== selectedStructure.rotation
+
+      if (deltaX === 0 && deltaY === 0 && !rotationChanged) return state
+
+      // Selected structures move as a group, so exclude the whole selection from
+      // collision checks. A rotation override only applies to a single selection.
+      const collisionState: PlannerState = {
+        ...state,
+        structures: state.structures.filter((s) => !state.selectedStructureIds.has(s.id)),
+      }
+
       for (const struct of state.structures) {
         if (!state.selectedStructureIds.has(struct.id)) continue
 
@@ -1039,7 +1057,9 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
 
         const newX = struct.x + deltaX
         const newY = struct.y + deltaY
-        const [width, height] = getRotatedSize(found.structure.size, struct.rotation)
+        const targetRotation =
+          isSingleSelection && rotation !== undefined ? rotation : struct.rotation
+        const [width, height] = getRotatedSize(found.structure.size, targetRotation)
 
         // Bounds check
         if (
@@ -1051,26 +1071,20 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
           return state // Invalid move - cancel
         }
 
-        // Collision check (exclude all selected structures from collision detection)
-        const hasCollisionWithOthers = hasCollision(
-          {
-            ...state,
-            structures: state.structures.filter((s) => !state.selectedStructureIds.has(s.id)),
-          },
-          found.structure,
-          newX,
-          newY,
-          struct.rotation
-        )
-        if (hasCollisionWithOthers) {
+        // Collision check uses the same tile-level rules as fresh placement.
+        if (hasCollision(collisionState, found.structure, newX, newY, targetRotation)) {
           return state // Invalid move - cancel
         }
       }
 
-      // All validations passed - apply the move
       const movedStructures = state.structures.map((s) => {
         if (!state.selectedStructureIds.has(s.id)) return s
-        return { ...s, x: s.x + deltaX, y: s.y + deltaY }
+        return {
+          ...s,
+          x: s.x + deltaX,
+          y: s.y + deltaY,
+          rotation: isSingleSelection && rotation !== undefined ? rotation : s.rotation,
+        }
       })
 
       return {
