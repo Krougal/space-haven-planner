@@ -59,27 +59,14 @@ const COLORS = {
   selectionEraseBorder: 'rgba(255, 68, 68, 0.85)',
   selectionHullPlaceFill: 'rgba(74, 90, 108, 0.35)',
   selectionHullEraseFill: 'rgba(180, 60, 60, 0.25)',
-  // Tile semantics should be category-independent so orientation is obvious.
-  // Red is intentionally reserved for invalid placement / destructive actions.
+  // Preserve the catalog's category colors for construction tiles. Tile semantics
+  // use a separate visual language so color keeps answering "what is this?".
   accessTileFill: 'rgba(64, 196, 230, 0.38)',
   accessTileBorder: 'rgba(112, 224, 255, 0.95)',
   accessTileMark: 'rgba(180, 242, 255, 0.9)',
-  blockedTileFill: 'rgba(220, 164, 58, 0.52)',
-  blockedTileBorder: 'rgba(246, 199, 92, 0.95)',
-}
-
-/**
- * The stock catalog uses red for both system and weapon categories. Those colors
- * compete with validation/error feedback, so use calmer display colors while
- * keeping the catalog data itself unchanged.
- */
-const DISPLAY_COLOR_OVERRIDES: Readonly<Record<string, string>> = {
-  '#cc4444': '#5477b8',
-  '#cc4466': '#8a67b0',
-}
-
-function getDisplayColor(color: string): string {
-  return DISPLAY_COLOR_OVERRIDES[color.toLowerCase()] ?? color
+  blockedTileFill: 'rgba(72, 80, 92, 0.42)',
+  blockedTileBorder: 'rgba(190, 198, 210, 0.55)',
+  blockedTileMark: 'rgba(214, 220, 230, 0.38)',
 }
 
 function renderAccessTileIndicator(
@@ -96,6 +83,25 @@ function renderAccessTileIndicator(
   ctx.beginPath()
   ctx.moveTo(tileX + inset, tileY + zoom - inset)
   ctx.lineTo(tileX + zoom - inset, tileY + inset)
+  ctx.stroke()
+}
+
+function renderBlockedTileIndicator(
+  ctx: CanvasRenderingContext2D,
+  tileX: number,
+  tileY: number,
+  zoom: number
+): void {
+  if (zoom < 7) return
+
+  const inset = Math.max(2, zoom * 0.24)
+  ctx.strokeStyle = COLORS.blockedTileMark
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(tileX + inset, tileY + inset)
+  ctx.lineTo(tileX + zoom - inset, tileY + zoom - inset)
+  ctx.moveTo(tileX + zoom - inset, tileY + inset)
+  ctx.lineTo(tileX + inset, tileY + zoom - inset)
   ctx.stroke()
 }
 
@@ -298,9 +304,9 @@ function hslToHsla(color: string, alpha: number): string {
  * Render a single placed structure
  *
  * Tile types are rendered differently:
- * - Construction: solid category color (the actual structure)
+ * - Construction: solid catalog/category color (the actual structure)
  * - Access: cyan marked tile (crew can walk here, can overlap with other access)
- * - Blocked: amber (impassable footprint)
+ * - Blocked: neutral cross-hatched tile (impassable footprint)
  *
  * @param renderedAccessTiles - Set of already rendered access tile keys to prevent double-rendering
  */
@@ -315,7 +321,7 @@ export function renderStructure(
 
   const { ctx, zoom } = rc
   const structureDef = found.structure
-  const structureColor = getDisplayColor(structureDef.color)
+  const structureColor = structureDef.color
   const [width, height] = getRotatedSize(structureDef.size, structure.rotation)
 
   const baseX = structure.x * zoom
@@ -363,6 +369,7 @@ export function renderStructure(
         ctx.strokeStyle = COLORS.blockedTileBorder
         ctx.lineWidth = 1
         ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
+        renderBlockedTileIndicator(ctx, tileX, tileY, zoom)
       } else {
         // Construction tiles: solid color (the actual structure)
         ctx.fillStyle = structureColor
@@ -686,14 +693,14 @@ export function renderSelectionOverlay(rc: RenderContext, overlay: SelectionOver
  * Render placement preview ghost with tile-level detail
  *
  * Shows:
- * - Construction tiles: structure color (what you're placing)
- * - Blocked tiles: amber (impassable footprint)
+ * - Construction tiles: original catalog/category color
+ * - Blocked tiles: neutral cross-hatched impassable footprint
  * - Access tiles: cyan marked tiles (walkable and overlap-compatible)
  * - Invalid placement: red outer border
  */
 export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
   const { ctx, zoom } = rc
-  const structureColor = getDisplayColor(preview.color)
+  const structureColor = preview.color
 
   // If we have tile layout, render tile-by-tile
   if (preview.tileLayout && preview.tileLayout.tiles.length > 0) {
@@ -734,6 +741,7 @@ export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
         ctx.strokeStyle = COLORS.blockedTileBorder
         ctx.lineWidth = 1
         ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
+        renderBlockedTileIndicator(ctx, tileX, tileY, zoom)
       } else {
         ctx.fillStyle = COLORS.accessTileFill
         ctx.fillRect(tileX, tileY, zoom, zoom)
