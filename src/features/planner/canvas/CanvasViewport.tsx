@@ -3,7 +3,6 @@ import { usePlanner, isStructureInteractive, canPlaceAt, type PlannerState } fro
 import {
   findStructureById,
   getRotatedSize,
-  type StructureCatalog,
   type PlacedStructure,
   type StructureDef,
   type StructureCategory,
