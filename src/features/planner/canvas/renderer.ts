@@ -387,7 +387,7 @@ export function renderGrid(rc: RenderContext): void {
   for (let y = 0; y <= gridSize.height; y++) {
     ctx.beginPath()
     ctx.moveTo(0, y * zoom + 0.5)
-    ctx.lineTo(gridSize.width * zoom, y + 0.5)
+    ctx.lineTo(gridSize.width * zoom, y * zoom + 0.5)
     ctx.stroke()
   }
 }
