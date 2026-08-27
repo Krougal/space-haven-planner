@@ -70,11 +70,10 @@ const COLORS = {
   blockedTileBorder: 'rgba(255, 255, 255, 0.48)',
   blockedTileMark: 'rgba(255, 255, 255, 0.48)',
 
-  // Wall-category tiles get their own neutral treatment, deliberately distinct
-  // from both the hull floor and blocked machine tiles.
+  // Wall-category tiles use a lighter neutral fill. The fill alone differentiates
+  // walls from the hull; doors and windows add their own simple fixture marks.
   wallTileFill: 'rgba(104, 118, 134, 0.92)',
   wallTileBorder: 'rgba(222, 228, 236, 0.72)',
-  wallTileMark: 'rgba(238, 242, 248, 0.48)',
   doorMark: 'rgba(238, 204, 142, 0.95)',
   windowMark: 'rgba(132, 218, 242, 0.95)',
 
@@ -144,25 +143,6 @@ function renderBlockedTileIndicator(
   ctx.stroke()
 }
 
-function renderWallTileIndicator(
-  ctx: CanvasRenderingContext2D,
-  tileX: number,
-  tileY: number,
-  zoom: number
-): void {
-  if (zoom < 7) return
-
-  const inset = Math.max(2, zoom * 0.22)
-  ctx.strokeStyle = COLORS.wallTileMark
-  ctx.lineWidth = 1
-  ctx.strokeRect(
-    tileX + inset,
-    tileY + inset,
-    Math.max(1, zoom - inset * 2),
-    Math.max(1, zoom - inset * 2)
-  )
-}
-
 function renderExclusionTileIndicator(
   ctx: CanvasRenderingContext2D,
   tileX: number,
@@ -208,13 +188,11 @@ function renderWallFixtureTileIndicator(
   tileY: number,
   zoom: number
 ): void {
-  if (zoom < 7) return
-  if (kind === 'wall') {
-    renderWallTileIndicator(ctx, tileX, tileY, zoom)
-    return
-  }
+  if (zoom < 7 || kind === 'wall') return
 
-  const horizontal = rotation === 0 || rotation === 180
+  // The JAR fixture orientation is perpendicular to the planner's piece rotation,
+  // so the visual mark needs a 90-degree offset to match the actual door/window.
+  const horizontal = rotation === 90 || rotation === 270
   const centerX = tileX + zoom / 2
   const centerY = tileY + zoom / 2
   const inset = Math.max(2, zoom * 0.16)
@@ -240,8 +218,6 @@ function renderWallFixtureTileIndicator(
     }
     ctx.stroke()
   } else {
-    // A door is represented as a single warm bar with a clean central opening.
-    // Keeping it inside the wall tile avoids the previous floating dumbbell icon.
     ctx.strokeStyle = COLORS.doorMark
     ctx.lineWidth = Math.max(1.5, zoom * 0.12)
     const gap = Math.max(2, zoom * 0.18)
@@ -820,7 +796,6 @@ export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
           ctx.strokeStyle = COLORS.wallTileBorder
           ctx.lineWidth = 1
           ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
-          renderWallTileIndicator(ctx, tileX, tileY, zoom)
         } else {
           ctx.fillStyle = colorWithAlpha(structureColor, 0.78)
           ctx.fillRect(tileX, tileY, zoom, zoom)
