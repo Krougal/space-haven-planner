@@ -59,15 +59,22 @@ const COLORS = {
   selectionHullPlaceFill: 'rgba(74, 90, 108, 0.35)',
   selectionHullEraseFill: 'rgba(180, 60, 60, 0.25)',
 
-  // Tile semantics use pattern/opacity rather than replacing the category color.
+  // Access tiles keep the parent structure's category color and use a slash to
+  // communicate that the tile is walkable/overlap-compatible.
   accessTileBorder: 'rgba(255, 255, 255, 0.42)',
   accessTileMark: 'rgba(255, 255, 255, 0.78)',
 
-  // Core blocked tiles (walls/solid impassable footprint) are deliberately
-  // distinct from both the hull floor and exterior exclusion zones.
-  blockedTileFill: 'rgba(96, 108, 122, 0.72)',
-  blockedTileBorder: 'rgba(202, 210, 220, 0.66)',
-  blockedTileMark: 'rgba(224, 230, 238, 0.30)',
+  // Impassable tiles that belong to a normal machine keep the machine's category
+  // color. The X communicates blocking without making beds, consoles, etc. look
+  // like walls.
+  blockedTileBorder: 'rgba(255, 255, 255, 0.48)',
+  blockedTileMark: 'rgba(255, 255, 255, 0.48)',
+
+  // Wall-category tiles get their own neutral treatment, deliberately distinct
+  // from both the hull floor and blocked machine tiles.
+  wallTileFill: 'rgba(104, 118, 134, 0.92)',
+  wallTileBorder: 'rgba(222, 228, 236, 0.72)',
+  wallTileMark: 'rgba(238, 242, 248, 0.48)',
 
   // Amber is reserved for exterior/reserved clearance around airlocks, engines,
   // hyperdrives and cargo docking structures.
@@ -135,6 +142,25 @@ function renderBlockedTileIndicator(
   ctx.stroke()
 }
 
+function renderWallTileIndicator(
+  ctx: CanvasRenderingContext2D,
+  tileX: number,
+  tileY: number,
+  zoom: number
+): void {
+  if (zoom < 7) return
+
+  const inset = Math.max(2, zoom * 0.22)
+  ctx.strokeStyle = COLORS.wallTileMark
+  ctx.lineWidth = 1
+  ctx.strokeRect(
+    tileX + inset,
+    tileY + inset,
+    Math.max(1, zoom - inset * 2),
+    Math.max(1, zoom - inset * 2)
+  )
+}
+
 function renderExclusionTileIndicator(
   ctx: CanvasRenderingContext2D,
   tileX: number,
@@ -174,14 +200,21 @@ function usesExteriorExclusionStyle(structureDef: StructureDef): boolean {
   )
 }
 
+function usesWallStyle(structureDef: StructureDef): boolean {
+  return structureDef.categoryId === 'wall'
+}
+
 /**
- * Placement preview does not carry the structure name/category, but category
- * colors are stable in the JAR catalog. Airlock and System are the two classes
- * that contain the exterior-clearance structures we care about here.
+ * Placement preview currently carries color but not category/name. These catalog
+ * colors are stable, so they are sufficient to keep preview styling consistent.
  */
 function previewUsesExteriorExclusionStyle(color: string): boolean {
   const normalized = color.toLowerCase()
   return normalized === '#8866aa' || normalized === '#cc4444'
+}
+
+function previewUsesWallStyle(color: string): boolean {
+  return color.toLowerCase() === '#3a4a5c'
 }
 
 export interface RenderContext {
@@ -323,7 +356,8 @@ function rotateTilePosition(
  * Render a single placed structure.
  * - Construction: solid category color
  * - Access: category-color tint + slash
- * - Blocked/core: neutral gray + X
+ * - Blocked machine body: category-color tint + X
+ * - Wall category: distinct neutral wall tile
  * - Exterior exclusion: amber hazard marking
  */
 export function renderStructure(
@@ -339,6 +373,7 @@ export function renderStructure(
   const structureDef = found.structure
   const structureColor = structureDef.color
   const exclusionStyle = usesExteriorExclusionStyle(structureDef)
+  const wallStyle = usesWallStyle(structureDef)
   const [width, height] = getRotatedSize(structureDef.size, structure.rotation)
 
   const baseX = structure.x * zoom
@@ -378,8 +413,15 @@ export function renderStructure(
           ctx.lineWidth = 1
           ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
           renderExclusionTileIndicator(ctx, tileX, tileY, zoom)
+        } else if (wallStyle) {
+          ctx.fillStyle = COLORS.wallTileFill
+          ctx.fillRect(tileX, tileY, zoom, zoom)
+          ctx.strokeStyle = COLORS.wallTileBorder
+          ctx.lineWidth = 1
+          ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
+          renderWallTileIndicator(ctx, tileX, tileY, zoom)
         } else {
-          ctx.fillStyle = COLORS.blockedTileFill
+          ctx.fillStyle = colorWithAlpha(structureColor, 0.78)
           ctx.fillRect(tileX, tileY, zoom, zoom)
           ctx.strokeStyle = COLORS.blockedTileBorder
           ctx.lineWidth = 1
@@ -636,6 +678,7 @@ export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
   const { ctx, zoom } = rc
   const structureColor = preview.color
   const exclusionStyle = previewUsesExteriorExclusionStyle(preview.color)
+  const wallStyle = previewUsesWallStyle(preview.color)
 
   if (preview.tileLayout && preview.tileLayout.tiles.length > 0) {
     const { tiles, width: layoutWidth, height: layoutHeight } = preview.tileLayout
@@ -670,8 +713,15 @@ export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
           ctx.lineWidth = 1
           ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
           renderExclusionTileIndicator(ctx, tileX, tileY, zoom)
+        } else if (wallStyle) {
+          ctx.fillStyle = COLORS.wallTileFill
+          ctx.fillRect(tileX, tileY, zoom, zoom)
+          ctx.strokeStyle = COLORS.wallTileBorder
+          ctx.lineWidth = 1
+          ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
+          renderWallTileIndicator(ctx, tileX, tileY, zoom)
         } else {
-          ctx.fillStyle = COLORS.blockedTileFill
+          ctx.fillStyle = colorWithAlpha(structureColor, 0.78)
           ctx.fillRect(tileX, tileY, zoom, zoom)
           ctx.strokeStyle = COLORS.blockedTileBorder
           ctx.lineWidth = 1
