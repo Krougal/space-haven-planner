@@ -221,18 +221,44 @@ function rotateTilePosition(
 }
 
 /**
- * Get all tiles for a structure at a position, categorized by type
- * Returns both blocking tiles (construction/blocked) and access tiles separately
+ * The current JAR catalog flattens exterior Space restrictions into `blocked`
+ * tiles. For the structures that expose those amber exterior-clearance regions,
+ * treat their blocked tiles as exclusion rather than solid structure body.
+ */
+function usesExteriorExclusionStyle(structureDef: StructureDef): boolean {
+  const name = structureDef.name.toLowerCase()
+  return (
+    structureDef.categoryId === 'airlock' ||
+    name.includes('airlock') ||
+    name.includes('cargo dock') ||
+    name.includes('cargo port') ||
+    name.includes('engine') ||
+    name.includes('hyperdrive') ||
+    name.includes('thruster')
+  )
+}
+
+/**
+ * Get all tiles for a structure at a position, categorized by collision role.
+ * Exterior exclusion tiles may overlap each other, but remain incompatible with
+ * solid structure or access tiles.
  */
 function getStructureTiles(
   structureDef: StructureDef,
   structX: number,
   structY: number,
   rotation: Rotation
-): { blocking: Set<string>; access: Set<string>; all: Set<string> } {
+): {
+  blocking: Set<string>
+  access: Set<string>
+  exclusion: Set<string>
+  all: Set<string>
+} {
   const blocking = new Set<string>()
   const access = new Set<string>()
+  const exclusion = new Set<string>()
   const all = new Set<string>()
+  const exteriorExclusion = usesExteriorExclusionStyle(structureDef)
 
   if (structureDef.tileLayout && structureDef.tileLayout.tiles.length > 0) {
     const { tiles, width: layoutWidth, height: layoutHeight } = structureDef.tileLayout
@@ -246,6 +272,8 @@ function getStructureTiles(
       all.add(key)
       if (tile.type === 'access') {
         access.add(key)
+      } else if (tile.type === 'blocked' && exteriorExclusion) {
+        exclusion.add(key)
       } else {
         blocking.add(key)
       }
@@ -262,15 +290,16 @@ function getStructureTiles(
     }
   }
 
-  return { blocking, access, all }
+  return { blocking, access, exclusion, all }
 }
 
 /**
- * Check if a structure at given position overlaps with existing structures
+ * Check if a structure at given position overlaps with existing structures.
  *
  * Collision rules:
- * - Blocking tiles (construction/blocked) CANNOT overlap with ANY tile of existing structures
- * - Access tiles CAN overlap with other access tiles only
+ * - Solid/blocking tiles cannot overlap any existing structure tile.
+ * - Access tiles can overlap access tiles only.
+ * - Exterior exclusion tiles can overlap exterior exclusion tiles only.
  */
 function hasCollision(
   state: PlannerState,
@@ -280,35 +309,37 @@ function hasCollision(
   rotation: Rotation,
   excludeId?: string
 ): boolean {
-  // Get tiles for the new structure
   const newTiles = getStructureTiles(structureDef, x, y, rotation)
 
-  // If no tiles at all, no collision possible
   if (newTiles.all.size === 0) {
     return false
   }
 
-  // Check against each existing structure
   for (const struct of state.structures) {
     if (excludeId && struct.id === excludeId) continue
 
     const found = findStructureById(state.catalog, struct.structureId)
     if (!found) continue
 
-    // Get tiles for the existing structure
     const existingTiles = getStructureTiles(found.structure, struct.x, struct.y, struct.rotation)
 
-    // Rule 1: New blocking tiles cannot overlap with ANY existing tile
+    // Solid body cannot overlap anything, including another structure's exclusion zone.
     for (const tileKey of newTiles.blocking) {
       if (existingTiles.all.has(tileKey)) {
         return true
       }
     }
 
-    // Rule 2: New access tiles cannot overlap with existing blocking tiles
-    // (but CAN overlap with existing access tiles)
+    // Access may overlap access only.
     for (const tileKey of newTiles.access) {
-      if (existingTiles.blocking.has(tileKey)) {
+      if (existingTiles.blocking.has(tileKey) || existingTiles.exclusion.has(tileKey)) {
+        return true
+      }
+    }
+
+    // Exterior exclusion may overlap exterior exclusion only.
+    for (const tileKey of newTiles.exclusion) {
+      if (existingTiles.blocking.has(tileKey) || existingTiles.access.has(tileKey)) {
         return true
       }
     }
@@ -1026,11 +1057,29 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
 
     case 'MOVE_SELECTED_STRUCTURES': {
       if (state.selectedStructureIds.size === 0) return state
-      const { deltaX, deltaY } = action
-      if (deltaX === 0 && deltaY === 0) return state
 
-      // Validate move for all selected structures before applying
-      // All structures must be able to move to their new positions
+      const { deltaX, deltaY, rotation } = action
+      const isSingleSelection = state.selectedStructureIds.size === 1
+      const selectedStructure = isSingleSelection
+        ? state.structures.find((s) => state.selectedStructureIds.has(s.id))
+        : undefined
+      const targetSingleRotation =
+        isSingleSelection && rotation !== undefined ? rotation : selectedStructure?.rotation
+      const rotationChanged =
+        isSingleSelection &&
+        selectedStructure !== undefined &&
+        targetSingleRotation !== undefined &&
+        targetSingleRotation !== selectedStructure.rotation
+
+      if (deltaX === 0 && deltaY === 0 && !rotationChanged) return state
+
+      // Selected structures move as a group, so exclude the whole selection from
+      // collision checks. A rotation override only applies to a single selection.
+      const collisionState: PlannerState = {
+        ...state,
+        structures: state.structures.filter((s) => !state.selectedStructureIds.has(s.id)),
+      }
+
       for (const struct of state.structures) {
         if (!state.selectedStructureIds.has(struct.id)) continue
 
@@ -1039,7 +1088,9 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
 
         const newX = struct.x + deltaX
         const newY = struct.y + deltaY
-        const [width, height] = getRotatedSize(found.structure.size, struct.rotation)
+        const targetRotation =
+          isSingleSelection && rotation !== undefined ? rotation : struct.rotation
+        const [width, height] = getRotatedSize(found.structure.size, targetRotation)
 
         // Bounds check
         if (
@@ -1051,26 +1102,20 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
           return state // Invalid move - cancel
         }
 
-        // Collision check (exclude all selected structures from collision detection)
-        const hasCollisionWithOthers = hasCollision(
-          {
-            ...state,
-            structures: state.structures.filter((s) => !state.selectedStructureIds.has(s.id)),
-          },
-          found.structure,
-          newX,
-          newY,
-          struct.rotation
-        )
-        if (hasCollisionWithOthers) {
+        // Collision check uses the same tile-level rules as fresh placement.
+        if (hasCollision(collisionState, found.structure, newX, newY, targetRotation)) {
           return state // Invalid move - cancel
         }
       }
 
-      // All validations passed - apply the move
       const movedStructures = state.structures.map((s) => {
         if (!state.selectedStructureIds.has(s.id)) return s
-        return { ...s, x: s.x + deltaX, y: s.y + deltaY }
+        return {
+          ...s,
+          x: s.x + deltaX,
+          y: s.y + deltaY,
+          rotation: isSingleSelection && rotation !== undefined ? rotation : s.rotation,
+        }
       })
 
       return {

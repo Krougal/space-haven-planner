@@ -1,18 +1,20 @@
 import { useRef, useEffect, useCallback, useState, useMemo } from 'react'
-import { usePlanner, isStructureInteractive, canPlaceAt } from '../state'
+import { usePlanner, isStructureInteractive, canPlaceAt, type PlannerState } from '../state'
 import {
   findStructureById,
   getRotatedSize,
-  type StructureCatalog,
   type PlacedStructure,
   type StructureDef,
   type StructureCategory,
+  type Rotation,
 } from '@/data'
+import { ZOOM_MAX, ZOOM_MIN, ZOOM_STEP } from '@/data/presets'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { StructureInfoPopover } from '../components/StructureInfoPopover'
 import {
   createRenderContext,
   renderScene,
+  renderStructure,
   renderSelectionOverlay,
   getTileFromMouse,
   type PreviewInfo,
@@ -29,6 +31,10 @@ const HOVER_DELAY_MS = 500
 
 /** Delay before closing popover when mouse leaves (ms) - allows moving to popover */
 const CLOSE_DELAY_MS = 150
+
+/** Keyboard viewport pan distance in CSS pixels */
+const KEYBOARD_PAN_STEP = 80
+const KEYBOARD_PAN_STEP_FAST = 240
 
 /** Check if event target is an input element */
 function isInputElement(target: EventTarget | null): boolean {
@@ -75,6 +81,12 @@ function rectIntersectsBounds(
   const bx2 = bounds.x + bounds.width - 1
   const by2 = bounds.y + bounds.height - 1
   return !(bx2 < r.x1 || bx1 > r.x2 || by2 < r.y1 || by1 > r.y2)
+}
+
+function rotateBy90(current: Rotation, direction: 'cw' | 'ccw'): Rotation {
+  const rotations: Rotation[] = [0, 90, 180, 270]
+  const idx = rotations.indexOf(current)
+  return direction === 'cw' ? rotations[(idx + 1) % 4] : rotations[(idx + 3) % 4]
 }
 
 function rotateTilePosition(
@@ -151,49 +163,40 @@ function getStructureSelectionBounds(
   return { x: struct.x, y: struct.y, width: w, height: h }
 }
 
-/** Check if moving selected structures by delta would be valid (bounds + collision) */
+/**
+ * Check a move preview with the same tile-level collision rules used for fresh
+ * placement. Selected structures are removed from the temporary collision state
+ * because they move together as a group.
+ */
 function isMoveValid(
+  state: PlannerState,
   selectedIds: ReadonlySet<string>,
-  structures: readonly PlacedStructure[],
-  catalog: StructureCatalog,
-  gridSize: { width: number; height: number },
   deltaX: number,
-  deltaY: number
+  deltaY: number,
+  singleRotation: Rotation | null
 ): boolean {
-  // Get IDs of non-selected structures for collision checking
-  const nonSelectedStructures = structures.filter((s) => !selectedIds.has(s.id))
+  const collisionState: PlannerState = {
+    ...state,
+    structures: state.structures.filter((s) => !selectedIds.has(s.id)),
+  }
+  const isSingleSelection = selectedIds.size === 1
 
-  for (const struct of structures) {
+  for (const struct of state.structures) {
     if (!selectedIds.has(struct.id)) continue
 
-    const found = findStructureById(catalog, struct.structureId)
-    if (!found) continue
+    const targetRotation =
+      isSingleSelection && singleRotation !== null ? singleRotation : struct.rotation
 
-    const newX = struct.x + deltaX
-    const newY = struct.y + deltaY
-    const [width, height] = getRotatedSize(found.structure.size, struct.rotation)
-
-    // Bounds check
-    if (newX < 0 || newY < 0 || newX + width > gridSize.width || newY + height > gridSize.height) {
+    if (
+      !canPlaceAt(
+        collisionState,
+        struct.structureId,
+        struct.x + deltaX,
+        struct.y + deltaY,
+        targetRotation
+      )
+    ) {
       return false
-    }
-
-    // Simple bounding box collision check against non-selected structures
-    // (Full tile-level collision is done in reducer, this is just for preview feedback)
-    for (const other of nonSelectedStructures) {
-      const otherFound = findStructureById(catalog, other.structureId)
-      if (!otherFound) continue
-      const [otherW, otherH] = getRotatedSize(otherFound.structure.size, other.rotation)
-
-      // Check bounding box overlap
-      if (
-        newX < other.x + otherW &&
-        newX + width > other.x &&
-        newY < other.y + otherH &&
-        newY + height > other.y
-      ) {
-        return false
-      }
     }
   }
 
@@ -275,15 +278,24 @@ export function CanvasViewport() {
   const [isPanning, setIsPanning] = useState(false)
   const [isMovingSelection, setIsMovingSelection] = useState(false)
   const [moveDelta, setMoveDelta] = useState<{ x: number; y: number } | null>(null)
+  const [moveRotation, setMoveRotation] = useState<Rotation | null>(null)
   const dragStartRef = useRef<{ x: number; y: number } | null>(null)
   const dragEndRef = useRef<{ x: number; y: number } | null>(null)
   const dragHullEraseRef = useRef<boolean>(false)
-  // For Space+drag panning
+  // For Space+drag or right-drag panning
   const panStartRef = useRef<{
     scrollLeft: number
     scrollTop: number
     clientX: number
     clientY: number
+  } | null>(null)
+  // Preserve the world point under the mouse while wheel-zooming.
+  const zoomAnchorRef = useRef<{
+    targetZoom: number
+    worldX: number
+    worldY: number
+    anchorX: number
+    anchorY: number
   } | null>(null)
 
   // Hover popover state for canvas structures
@@ -360,18 +372,56 @@ export function CanvasViewport() {
     }, HOVER_DELAY_MS)
   }, [clearCanvasCloseTimer, clearCanvasHoverTimer, structures, catalog])
 
-  // Close canvas popover when dragging/panning starts
-  // We handle this in the event handlers (handleMouseDown) instead of an effect
-  // to avoid the lint warning about setState in effects
-
-  // Track Space key for panning and Delete/Backspace for deletion
+  // Track Space, keyboard panning, deletion, and rotation while moving a single selected structure.
+  // Capture phase lets move-rotation consume Q/E before the global fresh-placement
+  // shortcut handler sees the event.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (isInputElement(e.target)) return
 
+      if (
+        isMovingSelection &&
+        selectedStructureIds.size === 1 &&
+        moveRotation !== null &&
+        (e.key === 'q' || e.key === 'Q' || e.key === 'e' || e.key === 'E')
+      ) {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        const direction = e.key === 'q' || e.key === 'Q' ? 'ccw' : 'cw'
+        setMoveRotation((current) => (current === null ? null : rotateBy90(current, direction)))
+        return
+      }
+
       if (e.key === ' ' || e.code === 'Space') {
         e.preventDefault()
         setIsSpaceHeld(true)
+      }
+
+      // WASD / arrow keys pan the scroll viewport. Ignore command-modified keys so
+      // browser/app shortcuts such as Ctrl+A remain available.
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        const key = e.key.toLowerCase()
+        const directions: Record<string, readonly [number, number]> = {
+          w: [0, -1],
+          arrowup: [0, -1],
+          s: [0, 1],
+          arrowdown: [0, 1],
+          a: [-1, 0],
+          arrowleft: [-1, 0],
+          d: [1, 0],
+          arrowright: [1, 0],
+        }
+        const direction = directions[key]
+        if (direction) {
+          const scrollContainer = containerRef.current?.parentElement
+          if (scrollContainer) {
+            e.preventDefault()
+            const step = e.shiftKey ? KEYBOARD_PAN_STEP_FAST : KEYBOARD_PAN_STEP
+            scrollContainer.scrollLeft += direction[0] * step
+            scrollContainer.scrollTop += direction[1] * step
+          }
+          return
+        }
       }
 
       // Delete/Backspace to delete selected structures
@@ -389,13 +439,51 @@ export function CanvasViewport() {
       }
     }
 
-    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keydown', handleKeyDown, true)
     window.addEventListener('keyup', handleKeyUp)
     return () => {
-      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keydown', handleKeyDown, true)
       window.removeEventListener('keyup', handleKeyUp)
     }
-  }, [selectedStructureIds.size])
+  }, [isMovingSelection, moveRotation, selectedStructureIds.size])
+
+  // Wheel over the planner canvas zooms the ship. A native non-passive listener is
+  // intentional: it lets us prevent Chrome's Ctrl+wheel browser zoom while the
+  // pointer is over the canvas, while leaving wheel behavior elsewhere untouched.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const handleWheel = (e: WheelEvent) => {
+      if (e.deltaY === 0) return
+      e.preventDefault()
+
+      const nextZoom = Math.max(
+        ZOOM_MIN,
+        Math.min(ZOOM_MAX, zoom + (e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP))
+      )
+      if (nextZoom === zoom) return
+
+      const scrollContainer = containerRef.current?.parentElement
+      if (scrollContainer) {
+        const rect = scrollContainer.getBoundingClientRect()
+        const anchorX = e.clientX - rect.left
+        const anchorY = e.clientY - rect.top
+        zoomAnchorRef.current = {
+          targetZoom: nextZoom,
+          worldX: (scrollContainer.scrollLeft + anchorX) / zoom,
+          worldY: (scrollContainer.scrollTop + anchorY) / zoom,
+          anchorX,
+          anchorY,
+        }
+      }
+
+      dispatch({ type: 'SET_ZOOM', zoom: nextZoom })
+    }
+
+    canvas.addEventListener('wheel', handleWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', handleWheel)
+  }, [dispatch, zoom])
 
   // Calculate preview info
   const getPreviewInfo = useCallback((): PreviewInfo | null => {
@@ -477,50 +565,56 @@ export function CanvasViewport() {
       const { ctx, zoom: z } = rc
       const deltaX = isMovingSelection && moveDelta ? moveDelta.x : 0
       const deltaY = isMovingSelection && moveDelta ? moveDelta.y : 0
+      const isSingleSelection = selectedStructureIds.size === 1
 
-      // Check if the move is valid (for visual feedback)
+      // Use the exact same placement/collision rules as the reducer so access-to-access
+      // overlap is previewed as valid instead of being rejected by a bounding box.
       const moveIsValid =
         !isMovingSelection ||
         !moveDelta ||
-        (moveDelta.x === 0 && moveDelta.y === 0) ||
-        isMoveValid(selectedStructureIds, structures, catalog, gridSize, deltaX, deltaY)
+        isMoveValid(state, selectedStructureIds, deltaX, deltaY, moveRotation)
 
       const selectedBounds: { x: number; y: number; width: number; height: number }[] = []
       for (const struct of structures) {
         if (!selectedStructureIds.has(struct.id)) continue
         const found = findStructureById(catalog, struct.structureId)
         if (!found) continue
-        const bounds = getStructureSelectionBounds(struct, found.structure)
-        // Apply move delta for preview
-        selectedBounds.push({
-          ...bounds,
-          x: bounds.x + deltaX,
-          y: bounds.y + deltaY,
-        })
+        const targetRotation =
+          isSingleSelection && moveRotation !== null ? moveRotation : struct.rotation
+        const previewStruct = {
+          ...struct,
+          x: struct.x + deltaX,
+          y: struct.y + deltaY,
+          rotation: targetRotation,
+        }
+        selectedBounds.push(getStructureSelectionBounds(previewStruct, found.structure))
       }
 
       if (selectedBounds.length > 0) {
-        // If moving, draw semi-transparent preview of structures at new position
-        if (isMovingSelection && moveDelta && (moveDelta.x !== 0 || moveDelta.y !== 0)) {
-          ctx.globalAlpha = 0.5
+        // Draw the actual rotated tile footprint while moving, rather than a simple
+        // bounding rectangle. This keeps access/blocked semantics visible.
+        if (isMovingSelection && moveDelta) {
+          ctx.globalAlpha = 0.55
           for (const struct of structures) {
             if (!selectedStructureIds.has(struct.id)) continue
-            const found = findStructureById(catalog, struct.structureId)
-            if (!found) continue
-            const bounds = getStructureSelectionBounds(struct, found.structure)
-            const px = (bounds.x + deltaX) * z
-            const py = (bounds.y + deltaY) * z
-            const pw = bounds.width * z
-            const ph = bounds.height * z
-            // Red tint if move is invalid, otherwise use structure color
-            ctx.fillStyle = moveIsValid ? found.structure.color : '#ff4444'
-            ctx.fillRect(px, py, pw, ph)
+            const targetRotation =
+              isSingleSelection && moveRotation !== null ? moveRotation : struct.rotation
+            renderStructure(
+              rc,
+              {
+                ...struct,
+                x: struct.x + deltaX,
+                y: struct.y + deltaY,
+                rotation: targetRotation,
+              },
+              catalog
+            )
           }
           ctx.globalAlpha = 1.0
         }
 
-        // Draw selection highlight around selected structures (at preview position)
-        // Red border if move is invalid
+        // Draw selection highlight around selected structures (at preview position).
+        // Red remains reserved for a genuinely invalid move.
         ctx.strokeStyle = moveIsValid ? '#58a6ff' : '#ff4444'
         ctx.lineWidth = 2
         ctx.setLineDash([4, 2])
@@ -551,8 +645,26 @@ export function CanvasViewport() {
     isPanning,
     isMovingSelection,
     moveDelta,
+    moveRotation,
     state,
   ])
+
+  // After the canvas has resized for a wheel zoom, restore the same world point
+  // beneath the pointer by compensating the scroll position.
+  useEffect(() => {
+    const pending = zoomAnchorRef.current
+    if (!pending || pending.targetZoom !== zoom) return
+    zoomAnchorRef.current = null
+
+    const frame = window.requestAnimationFrame(() => {
+      const scrollContainer = containerRef.current?.parentElement
+      if (!scrollContainer) return
+      scrollContainer.scrollLeft = pending.worldX * zoom - pending.anchorX
+      scrollContainer.scrollTop = pending.worldY * zoom - pending.anchorY
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [zoom])
 
   // Handle mouse move
   const handleMouseMove = useCallback(
@@ -563,7 +675,7 @@ export function CanvasViewport() {
       // Always track mouse position for popover anchor
       canvasMousePosRef.current = { x: e.clientX, y: e.clientY }
 
-      // Handle Space+drag panning
+      // Handle drag panning (Space+left or right mouse button)
       if (isPanning && panStartRef.current) {
         const scrollContainer = containerRef.current?.parentElement
         if (scrollContainer) {
@@ -619,7 +731,7 @@ export function CanvasViewport() {
   // Handle mouse down
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (e.button !== 0) return // Only left click
+      if (e.button !== 0 && e.button !== 2) return
 
       const canvas = canvasRef.current
       if (!canvas) return
@@ -629,8 +741,9 @@ export function CanvasViewport() {
       clearCanvasCloseTimer()
       setCanvasHoveredItem(null)
 
-      // Space+drag = panning (works in all tools)
-      if (isSpaceHeld) {
+      // Space+left-drag or right-drag = panning (works in all tools)
+      if (e.button === 2 || (e.button === 0 && isSpaceHeld)) {
+        e.preventDefault()
         const scrollContainer = containerRef.current?.parentElement
         if (scrollContainer) {
           setIsPanning(true)
@@ -643,6 +756,9 @@ export function CanvasViewport() {
         }
         return
       }
+
+      // From here on only ordinary left-button editing interactions apply.
+      if (e.button !== 0) return
 
       const tile = getTileFromMouse(canvas, e.clientX, e.clientY, zoom)
       dispatch({ type: 'SET_HOVERED_TILE', tile })
@@ -676,7 +792,15 @@ export function CanvasViewport() {
           if (!isAlreadySelected) {
             dispatch({ type: 'SET_SELECTED_STRUCTURES', structureIds: [clickedStructureId] })
           }
-          // Start moving
+
+          const clickedStructure = structures.find((s) => s.id === clickedStructureId)
+          const willMoveSingleStructure = !isAlreadySelected || selectedStructureIds.size === 1
+
+          // Start moving. Q/E can rotate only a single selected structure; rotating a
+          // multi-selection as a rigid group would require a separate group pivot model.
+          setMoveRotation(
+            willMoveSingleStructure && clickedStructure ? clickedStructure.rotation : null
+          )
           setIsMovingSelection(true)
           setMoveDelta({ x: 0, y: 0 })
           dragStartRef.current = { x: tile.x, y: tile.y }
@@ -701,6 +825,7 @@ export function CanvasViewport() {
       structures,
       catalog,
       clearCanvasHoverTimer,
+      clearCanvasCloseTimer,
     ]
   )
 
@@ -715,11 +840,17 @@ export function CanvasViewport() {
 
     // Handle end of move selection
     if (isMovingSelection) {
-      if (moveDelta && (moveDelta.x !== 0 || moveDelta.y !== 0)) {
-        dispatch({ type: 'MOVE_SELECTED_STRUCTURES', deltaX: moveDelta.x, deltaY: moveDelta.y })
+      if (moveDelta) {
+        dispatch({
+          type: 'MOVE_SELECTED_STRUCTURES',
+          deltaX: moveDelta.x,
+          deltaY: moveDelta.y,
+          rotation: selectedStructureIds.size === 1 ? (moveRotation ?? undefined) : undefined,
+        })
       }
       setIsMovingSelection(false)
       setMoveDelta(null)
+      setMoveRotation(null)
       dispatch({ type: 'SET_DRAGGING', isDragging: false })
       dragStartRef.current = null
       dragEndRef.current = null
@@ -873,6 +1004,8 @@ export function CanvasViewport() {
     isPanning,
     isMovingSelection,
     moveDelta,
+    moveRotation,
+    selectedStructureIds,
     tool,
     gridSize,
     selection,
@@ -893,6 +1026,7 @@ export function CanvasViewport() {
     setIsPanning(false)
     setIsMovingSelection(false)
     setMoveDelta(null)
+    setMoveRotation(null)
     panStartRef.current = null
     setDragRect(null)
 
@@ -922,8 +1056,9 @@ export function CanvasViewport() {
 
   // Determine cursor based on tool and state
   const getCursor = () => {
+    if (isPanning) return 'grabbing'
     // Space held = pan mode (works in all tools)
-    if (isSpaceHeld) return isPanning ? 'grabbing' : 'grab'
+    if (isSpaceHeld) return 'grab'
     if (isMovingSelection) return 'move'
     if (tool === 'erase') return 'crosshair'
     if (tool === 'hull') return 'cell'
@@ -940,6 +1075,7 @@ export function CanvasViewport() {
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
+        onContextMenu={(e) => e.preventDefault()}
         style={{
           cursor: getCursor(),
         }}
