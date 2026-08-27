@@ -8,6 +8,7 @@ import {
   type StructureCategory,
   type Rotation,
 } from '@/data'
+import { ZOOM_MAX, ZOOM_MIN, ZOOM_STEP } from '@/data/presets'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { StructureInfoPopover } from '../components/StructureInfoPopover'
 import {
@@ -30,6 +31,10 @@ const HOVER_DELAY_MS = 500
 
 /** Delay before closing popover when mouse leaves (ms) - allows moving to popover */
 const CLOSE_DELAY_MS = 150
+
+/** Keyboard viewport pan distance in CSS pixels */
+const KEYBOARD_PAN_STEP = 80
+const KEYBOARD_PAN_STEP_FAST = 240
 
 /** Check if event target is an input element */
 function isInputElement(target: EventTarget | null): boolean {
@@ -277,12 +282,20 @@ export function CanvasViewport() {
   const dragStartRef = useRef<{ x: number; y: number } | null>(null)
   const dragEndRef = useRef<{ x: number; y: number } | null>(null)
   const dragHullEraseRef = useRef<boolean>(false)
-  // For Space+drag panning
+  // For Space+drag or right-drag panning
   const panStartRef = useRef<{
     scrollLeft: number
     scrollTop: number
     clientX: number
     clientY: number
+  } | null>(null)
+  // Preserve the world point under the mouse while wheel-zooming.
+  const zoomAnchorRef = useRef<{
+    targetZoom: number
+    worldX: number
+    worldY: number
+    anchorX: number
+    anchorY: number
   } | null>(null)
 
   // Hover popover state for canvas structures
@@ -359,7 +372,7 @@ export function CanvasViewport() {
     }, HOVER_DELAY_MS)
   }, [clearCanvasCloseTimer, clearCanvasHoverTimer, structures, catalog])
 
-  // Track Space, deletion, and rotation while moving a single selected structure.
+  // Track Space, keyboard panning, deletion, and rotation while moving a single selected structure.
   // Capture phase lets move-rotation consume Q/E before the global fresh-placement
   // shortcut handler sees the event.
   useEffect(() => {
@@ -384,6 +397,33 @@ export function CanvasViewport() {
         setIsSpaceHeld(true)
       }
 
+      // WASD / arrow keys pan the scroll viewport. Ignore command-modified keys so
+      // browser/app shortcuts such as Ctrl+A remain available.
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        const key = e.key.toLowerCase()
+        const directions: Record<string, readonly [number, number]> = {
+          w: [0, -1],
+          arrowup: [0, -1],
+          s: [0, 1],
+          arrowdown: [0, 1],
+          a: [-1, 0],
+          arrowleft: [-1, 0],
+          d: [1, 0],
+          arrowright: [1, 0],
+        }
+        const direction = directions[key]
+        if (direction) {
+          const scrollContainer = containerRef.current?.parentElement
+          if (scrollContainer) {
+            e.preventDefault()
+            const step = e.shiftKey ? KEYBOARD_PAN_STEP_FAST : KEYBOARD_PAN_STEP
+            scrollContainer.scrollLeft += direction[0] * step
+            scrollContainer.scrollTop += direction[1] * step
+          }
+          return
+        }
+      }
+
       // Delete/Backspace to delete selected structures
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedStructureIds.size > 0) {
         e.preventDefault()
@@ -406,6 +446,44 @@ export function CanvasViewport() {
       window.removeEventListener('keyup', handleKeyUp)
     }
   }, [isMovingSelection, moveRotation, selectedStructureIds.size])
+
+  // Wheel over the planner canvas zooms the ship. A native non-passive listener is
+  // intentional: it lets us prevent Chrome's Ctrl+wheel browser zoom while the
+  // pointer is over the canvas, while leaving wheel behavior elsewhere untouched.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const handleWheel = (e: WheelEvent) => {
+      if (e.deltaY === 0) return
+      e.preventDefault()
+
+      const nextZoom = Math.max(
+        ZOOM_MIN,
+        Math.min(ZOOM_MAX, zoom + (e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP))
+      )
+      if (nextZoom === zoom) return
+
+      const scrollContainer = containerRef.current?.parentElement
+      if (scrollContainer) {
+        const rect = scrollContainer.getBoundingClientRect()
+        const anchorX = e.clientX - rect.left
+        const anchorY = e.clientY - rect.top
+        zoomAnchorRef.current = {
+          targetZoom: nextZoom,
+          worldX: (scrollContainer.scrollLeft + anchorX) / zoom,
+          worldY: (scrollContainer.scrollTop + anchorY) / zoom,
+          anchorX,
+          anchorY,
+        }
+      }
+
+      dispatch({ type: 'SET_ZOOM', zoom: nextZoom })
+    }
+
+    canvas.addEventListener('wheel', handleWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', handleWheel)
+  }, [dispatch, zoom])
 
   // Calculate preview info
   const getPreviewInfo = useCallback((): PreviewInfo | null => {
@@ -571,6 +649,23 @@ export function CanvasViewport() {
     state,
   ])
 
+  // After the canvas has resized for a wheel zoom, restore the same world point
+  // beneath the pointer by compensating the scroll position.
+  useEffect(() => {
+    const pending = zoomAnchorRef.current
+    if (!pending || pending.targetZoom !== zoom) return
+    zoomAnchorRef.current = null
+
+    const frame = window.requestAnimationFrame(() => {
+      const scrollContainer = containerRef.current?.parentElement
+      if (!scrollContainer) return
+      scrollContainer.scrollLeft = pending.worldX * zoom - pending.anchorX
+      scrollContainer.scrollTop = pending.worldY * zoom - pending.anchorY
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [zoom])
+
   // Handle mouse move
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -580,7 +675,7 @@ export function CanvasViewport() {
       // Always track mouse position for popover anchor
       canvasMousePosRef.current = { x: e.clientX, y: e.clientY }
 
-      // Handle Space+drag panning
+      // Handle drag panning (Space+left or right mouse button)
       if (isPanning && panStartRef.current) {
         const scrollContainer = containerRef.current?.parentElement
         if (scrollContainer) {
@@ -636,7 +731,7 @@ export function CanvasViewport() {
   // Handle mouse down
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (e.button !== 0) return // Only left click
+      if (e.button !== 0 && e.button !== 2) return
 
       const canvas = canvasRef.current
       if (!canvas) return
@@ -646,8 +741,9 @@ export function CanvasViewport() {
       clearCanvasCloseTimer()
       setCanvasHoveredItem(null)
 
-      // Space+drag = panning (works in all tools)
-      if (isSpaceHeld) {
+      // Space+left-drag or right-drag = panning (works in all tools)
+      if (e.button === 2 || (e.button === 0 && isSpaceHeld)) {
+        e.preventDefault()
         const scrollContainer = containerRef.current?.parentElement
         if (scrollContainer) {
           setIsPanning(true)
@@ -660,6 +756,9 @@ export function CanvasViewport() {
         }
         return
       }
+
+      // From here on only ordinary left-button editing interactions apply.
+      if (e.button !== 0) return
 
       const tile = getTileFromMouse(canvas, e.clientX, e.clientY, zoom)
       dispatch({ type: 'SET_HOVERED_TILE', tile })
@@ -957,8 +1056,9 @@ export function CanvasViewport() {
 
   // Determine cursor based on tool and state
   const getCursor = () => {
+    if (isPanning) return 'grabbing'
     // Space held = pan mode (works in all tools)
-    if (isSpaceHeld) return isPanning ? 'grabbing' : 'grab'
+    if (isSpaceHeld) return 'grab'
     if (isMovingSelection) return 'move'
     if (tool === 'erase') return 'crosshair'
     if (tool === 'hull') return 'cell'
@@ -975,6 +1075,7 @@ export function CanvasViewport() {
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
+        onContextMenu={(e) => e.preventDefault()}
         style={{
           cursor: getCursor(),
         }}
