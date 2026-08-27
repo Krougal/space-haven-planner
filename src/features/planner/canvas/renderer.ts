@@ -6,6 +6,7 @@ import type {
   Rotation,
   UserLayer,
   UserGroup,
+  StructureDef,
 } from '@/data/types'
 import { findStructureById, getRotatedSize } from '@/data'
 import { computePerimeterEdges, isInnerHullTile } from './hullPerimeter'
@@ -22,11 +23,9 @@ export interface VisibilityState {
  * Check if a structure is visible based on its layer and group visibility
  */
 function isStructureVisibleForRender(visState: VisibilityState, struct: PlacedStructure): boolean {
-  // Check user layer visibility
   const layer = visState.userLayers.find((l) => l.id === struct.orgLayerId)
   if (!layer || !layer.isVisible) return false
 
-  // Check group visibility if structure is in a group
   if (struct.orgGroupId) {
     const group = visState.userGroups.find((g) => g.id === struct.orgGroupId)
     if (group && !group.isVisible) return false
@@ -39,7 +38,7 @@ function isStructureVisibleForRender(visState: VisibilityState, struct: PlacedSt
 const COLORS = {
   background: '#1a1e24',
   gridLine: '#2a3040',
-  centerLine: '#1a5a5a', // Teal/cyan color for center crosshair lines
+  centerLine: '#1a5a5a',
   previewValid: 'rgba(136, 255, 136, 0.5)',
   previewInvalid: 'rgba(255, 68, 68, 0.4)',
   previewBorderValid: '#88ff88',
@@ -48,8 +47,8 @@ const COLORS = {
   structureText: '#ffffff',
   structureTextShadow: '#000000',
   hullTile: '#3a4a5c',
-  hullTileInner: '#2a3a4c', // Slightly darker for inner tiles
-  hullGridLine: 'rgba(255, 255, 255, 0.08)', // Subtle internal grid for hull tiles
+  hullTileInner: '#2a3a4c',
+  hullGridLine: 'rgba(255, 255, 255, 0.08)',
   hullWall: '#5a6a7c',
   hullPreview: 'rgba(74, 90, 108, 0.6)',
   hullPreviewBorder: '#6a8a9c',
@@ -59,14 +58,45 @@ const COLORS = {
   selectionEraseBorder: 'rgba(255, 68, 68, 0.85)',
   selectionHullPlaceFill: 'rgba(74, 90, 108, 0.35)',
   selectionHullEraseFill: 'rgba(180, 60, 60, 0.25)',
-  // Preserve the catalog's category colors for construction tiles. Tile semantics
-  // use a separate visual language so color keeps answering "what is this?".
-  accessTileFill: 'rgba(64, 196, 230, 0.38)',
-  accessTileBorder: 'rgba(112, 224, 255, 0.95)',
-  accessTileMark: 'rgba(180, 242, 255, 0.9)',
-  blockedTileFill: 'rgba(72, 80, 92, 0.42)',
-  blockedTileBorder: 'rgba(190, 198, 210, 0.55)',
-  blockedTileMark: 'rgba(214, 220, 230, 0.38)',
+
+  // Tile semantics use pattern/opacity rather than replacing the category color.
+  accessTileBorder: 'rgba(255, 255, 255, 0.42)',
+  accessTileMark: 'rgba(255, 255, 255, 0.78)',
+
+  // Core blocked tiles (walls/solid impassable footprint) are deliberately
+  // distinct from both the hull floor and exterior exclusion zones.
+  blockedTileFill: 'rgba(96, 108, 122, 0.72)',
+  blockedTileBorder: 'rgba(202, 210, 220, 0.66)',
+  blockedTileMark: 'rgba(224, 230, 238, 0.30)',
+
+  // Amber is reserved for exterior/reserved clearance around airlocks, engines,
+  // hyperdrives and cargo docking structures.
+  exclusionTileFill: 'rgba(204, 136, 68, 0.42)',
+  exclusionTileBorder: 'rgba(238, 178, 86, 0.92)',
+  exclusionTileMark: 'rgba(255, 214, 132, 0.78)',
+}
+
+function colorWithAlpha(color: string, alpha: number): string {
+  const hex = color.match(/^#([0-9a-f]{6})$/i)
+  if (hex) {
+    const value = hex[1]
+    const r = parseInt(value.slice(0, 2), 16)
+    const g = parseInt(value.slice(2, 4), 16)
+    const b = parseInt(value.slice(4, 6), 16)
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`
+  }
+
+  const hsl = color.match(/^hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)$/i)
+  if (hsl) {
+    return `hsla(${hsl[1]}, ${hsl[2]}%, ${hsl[3]}%, ${alpha})`
+  }
+
+  const rgb = color.match(/^rgb\(([^)]+)\)$/i)
+  if (rgb) {
+    return `rgba(${rgb[1]}, ${alpha})`
+  }
+
+  return color
 }
 
 function renderAccessTileIndicator(
@@ -103,6 +133,55 @@ function renderBlockedTileIndicator(
   ctx.moveTo(tileX + zoom - inset, tileY + inset)
   ctx.lineTo(tileX + inset, tileY + zoom - inset)
   ctx.stroke()
+}
+
+function renderExclusionTileIndicator(
+  ctx: CanvasRenderingContext2D,
+  tileX: number,
+  tileY: number,
+  zoom: number
+): void {
+  if (zoom < 7) return
+
+  const inset = Math.max(2, zoom * 0.16)
+  const gap = Math.max(2, zoom * 0.24)
+  ctx.strokeStyle = COLORS.exclusionTileMark
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(tileX + inset, tileY + zoom - inset)
+  ctx.lineTo(tileX + zoom - inset - gap, tileY + inset)
+  ctx.moveTo(tileX + inset + gap, tileY + zoom - inset)
+  ctx.lineTo(tileX + zoom - inset, tileY + inset + gap)
+  ctx.stroke()
+}
+
+/**
+ * The JAR converter currently flattens both solid walkGridCost=255 tiles and
+ * Space restrictions into the same `blocked` tile type. Until that source
+ * distinction is retained in the catalog, classify the structures whose blocked
+ * regions are known to represent exterior/reserved clearance.
+ */
+function usesExteriorExclusionStyle(structureDef: StructureDef): boolean {
+  const name = structureDef.name.toLowerCase()
+  return (
+    structureDef.categoryId === 'airlock' ||
+    name.includes('airlock') ||
+    name.includes('cargo dock') ||
+    name.includes('cargo port') ||
+    name.includes('engine') ||
+    name.includes('hyperdrive') ||
+    name.includes('thruster')
+  )
+}
+
+/**
+ * Placement preview does not carry the structure name/category, but category
+ * colors are stable in the JAR catalog. Airlock and System are the two classes
+ * that contain the exterior-clearance structures we care about here.
+ */
+function previewUsesExteriorExclusionStyle(color: string): boolean {
+  const normalized = color.toLowerCase()
+  return normalized === '#8866aa' || normalized === '#cc4444'
 }
 
 export interface RenderContext {
@@ -145,15 +224,10 @@ export interface SelectionOverlayRect {
 export interface SelectionOverlay {
   mode: SelectionOverlayMode
   rect: SelectionOverlayRect
-  /** Optional: used by erase/select modes to highlight only existing hull tiles */
   hullTiles?: ReadonlySet<string>
-  /** Optional: size-based bounds to highlight selected structures */
   structureBounds?: readonly { x: number; y: number; width: number; height: number }[]
 }
 
-/**
- * Create a render context for the canvas
- */
 export function createRenderContext(
   canvas: HTMLCanvasElement,
   gridSize: GridSize,
@@ -168,38 +242,26 @@ export function createRenderContext(
   const width = gridSize.width * zoom
   const height = gridSize.height * zoom
 
-  // Set display size
   canvas.style.width = `${width}px`
   canvas.style.height = `${height}px`
-
-  // Set actual size in memory (scaled for DPR)
   canvas.width = width * dpr
   canvas.height = height * dpr
-
-  // Scale context to match DPR
   ctx.scale(dpr, dpr)
 
   return { canvas, ctx, gridSize, zoom, dpr }
 }
 
-/**
- * Clear the canvas with background color
- */
 export function clearCanvas(rc: RenderContext): void {
   rc.ctx.fillStyle = COLORS.background
   rc.ctx.fillRect(0, 0, rc.gridSize.width * rc.zoom, rc.gridSize.height * rc.zoom)
 }
 
-/**
- * Render grid lines
- */
 export function renderGrid(rc: RenderContext): void {
   const { ctx, gridSize, zoom } = rc
 
   ctx.strokeStyle = COLORS.gridLine
   ctx.lineWidth = 1
 
-  // Vertical lines
   for (let x = 0; x <= gridSize.width; x++) {
     ctx.beginPath()
     ctx.moveTo(x * zoom + 0.5, 0)
@@ -207,7 +269,6 @@ export function renderGrid(rc: RenderContext): void {
     ctx.stroke()
   }
 
-  // Horizontal lines
   for (let y = 0; y <= gridSize.height; y++) {
     ctx.beginPath()
     ctx.moveTo(0, y * zoom + 0.5)
@@ -216,37 +277,26 @@ export function renderGrid(rc: RenderContext): void {
   }
 }
 
-/**
- * Render center crosshair lines (thick lines marking the center of the grid)
- * These appear below hull tiles and structures, similar to the game's grid
- */
 export function renderCenterLines(rc: RenderContext): void {
   const { ctx, gridSize, zoom } = rc
 
   ctx.strokeStyle = COLORS.centerLine
-  ctx.lineWidth = 3 // Thicker than regular grid lines
+  ctx.lineWidth = 3
 
-  // Calculate center positions (at the edge between two center tiles)
   const centerX = Math.floor(gridSize.width / 2) * zoom
   const centerY = Math.floor(gridSize.height / 2) * zoom
 
-  // Vertical center line
   ctx.beginPath()
   ctx.moveTo(centerX + 0.5, 0)
   ctx.lineTo(centerX + 0.5, gridSize.height * zoom)
   ctx.stroke()
 
-  // Horizontal center line
   ctx.beginPath()
   ctx.moveTo(0, centerY + 0.5)
   ctx.lineTo(gridSize.width * zoom, centerY + 0.5)
   ctx.stroke()
 }
 
-/**
- * Rotate a tile position based on structure rotation
- * Assumes the structure's origin is at (0,0) and rotates around the center
- */
 function rotateTilePosition(
   tile: StructureTile,
   rotation: Rotation,
@@ -259,13 +309,10 @@ function rotateTilePosition(
     case 0:
       return { x, y }
     case 90:
-      // Rotate 90° clockwise: (x, y) -> (height - 1 - y, x)
       return { x: layoutHeight - 1 - y, y: x }
     case 180:
-      // Rotate 180°: (x, y) -> (width - 1 - x, height - 1 - y)
       return { x: layoutWidth - 1 - x, y: layoutHeight - 1 - y }
     case 270:
-      // Rotate 270° clockwise (90° counter-clockwise): (x, y) -> (y, width - 1 - x)
       return { x: y, y: layoutWidth - 1 - x }
     default:
       return { x, y }
@@ -273,42 +320,11 @@ function rotateTilePosition(
 }
 
 /**
- * Parse HSL color string and return components
- * Handles format: hsl(h, s%, l%)
- */
-function parseHslColor(color: string): { h: number; s: number; l: number } | null {
-  const match = color.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/)
-  if (match) {
-    return {
-      h: parseInt(match[1], 10),
-      s: parseInt(match[2], 10),
-      l: parseInt(match[3], 10),
-    }
-  }
-  return null
-}
-
-/**
- * Convert HSL to HSLA string with alpha
- */
-function hslToHsla(color: string, alpha: number): string {
-  const hsl = parseHslColor(color)
-  if (hsl) {
-    return `hsla(${hsl.h}, ${hsl.s}%, ${hsl.l}%, ${alpha})`
-  }
-  // Fallback: append alpha to hex/rgb colors
-  return color.replace(')', `, ${alpha})`).replace('rgb(', 'rgba(')
-}
-
-/**
- * Render a single placed structure
- *
- * Tile types are rendered differently:
- * - Construction: solid catalog/category color (the actual structure)
- * - Access: cyan marked tile (crew can walk here, can overlap with other access)
- * - Blocked: neutral cross-hatched tile (impassable footprint)
- *
- * @param renderedAccessTiles - Set of already rendered access tile keys to prevent double-rendering
+ * Render a single placed structure.
+ * - Construction: solid category color
+ * - Access: category-color tint + slash
+ * - Blocked/core: neutral gray + X
+ * - Exterior exclusion: amber hazard marking
  */
 export function renderStructure(
   rc: RenderContext,
@@ -322,6 +338,7 @@ export function renderStructure(
   const { ctx, zoom } = rc
   const structureDef = found.structure
   const structureColor = structureDef.color
+  const exclusionStyle = usesExteriorExclusionStyle(structureDef)
   const [width, height] = getRotatedSize(structureDef.size, structure.rotation)
 
   const baseX = structure.x * zoom
@@ -329,15 +346,11 @@ export function renderStructure(
   const w = width * zoom
   const h = height * zoom
 
-  // Check if we have detailed tile layout
   if (structureDef.tileLayout && structureDef.tileLayout.tiles.length > 0) {
-    // Render with detailed tile layout
     const { tiles, width: layoutWidth, height: layoutHeight } = structureDef.tileLayout
 
     for (const tile of tiles) {
-      // Rotate tile position based on structure rotation
       const rotatedPos = rotateTilePosition(tile, structure.rotation, layoutWidth, layoutHeight)
-
       const worldX = structure.x + rotatedPos.x
       const worldY = structure.y + rotatedPos.y
       const tileKey = `${worldX},${worldY}`
@@ -345,15 +358,10 @@ export function renderStructure(
       const tileY = worldY * zoom
 
       if (tile.type === 'access') {
-        // Skip rendering if this access tile was already rendered by another structure
-        if (renderedAccessTiles?.has(tileKey)) {
-          continue
-        }
-
-        // Mark this access tile as rendered
+        if (renderedAccessTiles?.has(tileKey)) continue
         renderedAccessTiles?.add(tileKey)
 
-        ctx.fillStyle = COLORS.accessTileFill
+        ctx.fillStyle = colorWithAlpha(structureColor, 0.46)
         ctx.fillRect(tileX, tileY, zoom, zoom)
 
         ctx.setLineDash([2, 2])
@@ -363,45 +371,43 @@ export function renderStructure(
         ctx.setLineDash([])
         renderAccessTileIndicator(ctx, tileX, tileY, zoom)
       } else if (tile.type === 'blocked') {
-        ctx.fillStyle = COLORS.blockedTileFill
-        ctx.fillRect(tileX, tileY, zoom, zoom)
-
-        ctx.strokeStyle = COLORS.blockedTileBorder
-        ctx.lineWidth = 1
-        ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
-        renderBlockedTileIndicator(ctx, tileX, tileY, zoom)
+        if (exclusionStyle) {
+          ctx.fillStyle = COLORS.exclusionTileFill
+          ctx.fillRect(tileX, tileY, zoom, zoom)
+          ctx.strokeStyle = COLORS.exclusionTileBorder
+          ctx.lineWidth = 1
+          ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
+          renderExclusionTileIndicator(ctx, tileX, tileY, zoom)
+        } else {
+          ctx.fillStyle = COLORS.blockedTileFill
+          ctx.fillRect(tileX, tileY, zoom, zoom)
+          ctx.strokeStyle = COLORS.blockedTileBorder
+          ctx.lineWidth = 1
+          ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
+          renderBlockedTileIndicator(ctx, tileX, tileY, zoom)
+        }
       } else {
-        // Construction tiles: solid color (the actual structure)
         ctx.fillStyle = structureColor
         ctx.fillRect(tileX, tileY, zoom, zoom)
-
-        // Solid border
         ctx.strokeStyle = COLORS.structureBorder
         ctx.lineWidth = 1
         ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
       }
     }
   } else {
-    // Fallback: render as solid rectangle (old behavior)
     ctx.fillStyle = structureColor
     ctx.fillRect(baseX, baseY, w, h)
-
-    // Border
     ctx.strokeStyle = COLORS.structureBorder
     ctx.lineWidth = 1
     ctx.strokeRect(baseX + 0.5, baseY + 0.5, w - 1, h - 1)
   }
 
-  // Label (only if zoom is large enough)
-  // Skip labels for hull-related structures (hull, walls, windows, doors)
   const hullRelatedNames = ['wall', 'door', 'window', 'hull']
   const isHullRelated = hullRelatedNames.some((name) =>
     structureDef.name.toLowerCase().includes(name)
   )
 
   if (zoom >= 10 && !isHullRelated) {
-    // Calculate center of solid tiles (construction + blocked, NOT access)
-    // These are the tiles that form the actual visible structure
     let solidMinX = Infinity,
       solidMaxX = -Infinity,
       solidMinY = Infinity,
@@ -412,8 +418,6 @@ export function renderStructure(
       const { tiles, width: layoutWidth, height: layoutHeight } = structureDef.tileLayout
 
       for (const tile of tiles) {
-        // Include both construction and blocked tiles as "solid" (the actual structure)
-        // Access tiles are transparent walkable areas, not part of the solid structure
         if (tile.type === 'construction' || tile.type === 'blocked') {
           const rotatedPos = rotateTilePosition(tile, structure.rotation, layoutWidth, layoutHeight)
           const worldX = structure.x + rotatedPos.x
@@ -428,7 +432,6 @@ export function renderStructure(
       }
     }
 
-    // If no solid tiles found, use the full bounding box
     if (!hasSolidTiles) {
       solidMinX = structure.x
       solidMaxX = structure.x + width - 1
@@ -436,7 +439,6 @@ export function renderStructure(
       solidMaxY = structure.y + height - 1
     }
 
-    // Calculate center of solid area in pixels
     const solidCenterX = ((solidMinX + solidMaxX + 1) / 2) * zoom
     const solidCenterY = ((solidMinY + solidMaxY + 1) / 2) * zoom
 
@@ -449,13 +451,7 @@ export function renderStructure(
     ctx.shadowBlur = 2
     ctx.shadowOffsetX = 1
     ctx.shadowOffsetY = 1
-
-    // Show full text, allow overflow
-    const text = structureDef.name
-
-    ctx.fillText(text, solidCenterX, solidCenterY)
-
-    // Reset shadow
+    ctx.fillText(structureDef.name, solidCenterX, solidCenterY)
     ctx.shadowColor = 'transparent'
     ctx.shadowBlur = 0
     ctx.shadowOffsetX = 0
@@ -463,17 +459,12 @@ export function renderStructure(
   }
 }
 
-/**
- * Render all placed structures
- * Tracks rendered access tiles to prevent double-rendering overlapping access areas
- */
 export function renderStructures(
   rc: RenderContext,
   structures: readonly PlacedStructure[],
   catalog: StructureCatalog,
   visibilityState: VisibilityState
 ): void {
-  // Track which access tiles have been rendered to avoid double-rendering
   const renderedAccessTiles = new Set<string>()
 
   for (const structure of structures) {
@@ -483,56 +474,33 @@ export function renderStructures(
   }
 }
 
-/**
- * Render all hull tiles as a merged surface with perimeter walls as edge segments.
- *
- * Hull tiles are rendered as a continuous floor (no internal seams between adjacent tiles).
- * Auto-walls are drawn as edge segments along the perimeter using 4-neighbor adjacency
- * (no diagonal wall tiles). This creates a cleaner, more game-like appearance.
- */
 export function renderHullTiles(rc: RenderContext, hullTiles: ReadonlySet<string>): void {
-  // Hull tiles are always visible (they're painted directly, not tied to user layers)
   if (hullTiles.size === 0) return
 
   const { ctx, zoom } = rc
-
-  // Wall edge thickness (in pixels, scales with zoom)
   const wallThickness = Math.max(2, Math.floor(zoom * 0.15))
-
-  // Compute perimeter edges using 4-neighbor adjacency
   const edges = computePerimeterEdges(hullTiles)
 
-  // 1) Render hull floor tiles as a merged surface
   for (const key of hullTiles) {
     const [xStr, yStr] = key.split(',')
     const tileX = parseInt(xStr, 10)
     const tileY = parseInt(yStr, 10)
-
     const x = tileX * zoom
     const y = tileY * zoom
-
-    // Use slightly darker color for inner tiles (fully surrounded) for subtle depth
     const isInner = isInnerHullTile(hullTiles, tileX, tileY)
     ctx.fillStyle = isInner ? COLORS.hullTileInner : COLORS.hullTile
     ctx.fillRect(x, y, zoom, zoom)
   }
 
-  // 2) Render subtle internal grid lines between adjacent hull tiles (helps with placement)
   ctx.strokeStyle = COLORS.hullGridLine
   ctx.lineWidth = 1
   for (const key of hullTiles) {
     const [xStr, yStr] = key.split(',')
     const tileX = parseInt(xStr, 10)
     const tileY = parseInt(yStr, 10)
-
     const x = tileX * zoom
     const y = tileY * zoom
 
-    // Draw internal grid lines only where there's an adjacent hull tile
-    // This creates grid lines inside the hull region without affecting the perimeter
-    // Only draw right and bottom edges to avoid double-drawing shared edges
-
-    // Right edge - draw if there's a hull neighbor to the east
     if (hullTiles.has(`${tileX + 1},${tileY}`)) {
       ctx.beginPath()
       ctx.moveTo(x + zoom + 0.5, y)
@@ -540,7 +508,6 @@ export function renderHullTiles(rc: RenderContext, hullTiles: ReadonlySet<string
       ctx.stroke()
     }
 
-    // Bottom edge - draw if there's a hull neighbor to the south
     if (hullTiles.has(`${tileX},${tileY + 1}`)) {
       ctx.beginPath()
       ctx.moveTo(x, y + zoom + 0.5)
@@ -549,7 +516,6 @@ export function renderHullTiles(rc: RenderContext, hullTiles: ReadonlySet<string
     }
   }
 
-  // 3) Render perimeter walls as edge segments inside hull tiles
   ctx.fillStyle = COLORS.hullWall
   for (const edge of edges) {
     const x = edge.x * zoom
@@ -557,50 +523,35 @@ export function renderHullTiles(rc: RenderContext, hullTiles: ReadonlySet<string
 
     switch (edge.direction) {
       case 'north':
-        // Top edge strip
         ctx.fillRect(x, y, zoom, wallThickness)
         break
       case 'south':
-        // Bottom edge strip
         ctx.fillRect(x, y + zoom - wallThickness, zoom, wallThickness)
         break
       case 'west':
-        // Left edge strip
         ctx.fillRect(x, y, wallThickness, zoom)
         break
       case 'east':
-        // Right edge strip
         ctx.fillRect(x + zoom - wallThickness, y, wallThickness, zoom)
         break
     }
   }
 }
 
-/**
- * Render hull tool preview (single tile ghost)
- */
 export function renderHullPreview(rc: RenderContext, preview: HullPreviewInfo): void {
   const { ctx, zoom } = rc
-
   const x = preview.x * zoom
   const y = preview.y * zoom
-  const size = zoom
 
-  // Fill
   ctx.fillStyle = COLORS.hullPreview
-  ctx.fillRect(x, y, size, size)
-
-  // Dashed border
+  ctx.fillRect(x, y, zoom, zoom)
   ctx.setLineDash([3, 3])
   ctx.strokeStyle = COLORS.hullPreviewBorder
   ctx.lineWidth = 2
-  ctx.strokeRect(x + 1, y + 1, size - 2, size - 2)
+  ctx.strokeRect(x + 1, y + 1, zoom - 2, zoom - 2)
   ctx.setLineDash([])
 }
 
-/**
- * Render a drag-selection overlay on top of the scene.
- */
 export function renderSelectionOverlay(rc: RenderContext, overlay: SelectionOverlay): void {
   const { ctx, zoom } = rc
 
@@ -614,9 +565,7 @@ export function renderSelectionOverlay(rc: RenderContext, overlay: SelectionOver
   const pw = (maxX - minX + 1) * zoom
   const ph = (maxY - minY + 1) * zoom
 
-  // Base selection fill
   if (overlay.mode === 'hull_place') {
-    // Highlight tiles individually for hull placement
     ctx.fillStyle = COLORS.selectionHullPlaceFill
     for (let x = minX; x <= maxX; x++) {
       for (let y = minY; y <= maxY; y++) {
@@ -624,40 +573,32 @@ export function renderSelectionOverlay(rc: RenderContext, overlay: SelectionOver
       }
     }
   } else if (overlay.mode === 'hull_erase') {
-    // Highlight only existing hull tiles (if provided)
     ctx.fillStyle = COLORS.selectionHullEraseFill
     if (overlay.hullTiles) {
       for (let x = minX; x <= maxX; x++) {
         for (let y = minY; y <= maxY; y++) {
           const key = `${x},${y}`
-          if (overlay.hullTiles.has(key)) {
-            ctx.fillRect(x * zoom, y * zoom, zoom, zoom)
-          }
+          if (overlay.hullTiles.has(key)) ctx.fillRect(x * zoom, y * zoom, zoom, zoom)
         }
       }
     } else {
       ctx.fillRect(px, py, pw, ph)
     }
   } else {
-    // Selection of existing objects (place/erase tools)
     ctx.fillStyle = overlay.mode === 'erase' ? COLORS.selectionEraseFill : COLORS.selectionFill
     ctx.fillRect(px, py, pw, ph)
 
-    // Highlight existing hull tiles inside rect
     if (overlay.hullTiles) {
       ctx.fillStyle =
         overlay.mode === 'erase' ? COLORS.selectionHullEraseFill : COLORS.selectionFill
       for (let x = minX; x <= maxX; x++) {
         for (let y = minY; y <= maxY; y++) {
           const key = `${x},${y}`
-          if (overlay.hullTiles.has(key)) {
-            ctx.fillRect(x * zoom, y * zoom, zoom, zoom)
-          }
+          if (overlay.hullTiles.has(key)) ctx.fillRect(x * zoom, y * zoom, zoom, zoom)
         }
       }
     }
 
-    // Highlight selected structures by bounds (size-based)
     if (overlay.structureBounds && overlay.structureBounds.length > 0) {
       ctx.fillStyle = overlay.mode === 'erase' ? COLORS.selectionEraseFill : COLORS.selectionFill
       ctx.strokeStyle =
@@ -676,7 +617,6 @@ export function renderSelectionOverlay(rc: RenderContext, overlay: SelectionOver
     }
   }
 
-  // Selection border
   ctx.setLineDash([4, 4])
   ctx.strokeStyle =
     overlay.mode === 'hull_place'
@@ -690,33 +630,24 @@ export function renderSelectionOverlay(rc: RenderContext, overlay: SelectionOver
 }
 
 /**
- * Render placement preview ghost with tile-level detail
- *
- * Shows:
- * - Construction tiles: original catalog/category color
- * - Blocked tiles: neutral cross-hatched impassable footprint
- * - Access tiles: cyan marked tiles (walkable and overlap-compatible)
- * - Invalid placement: red outer border
+ * Render placement preview ghost with tile-level detail.
  */
 export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
   const { ctx, zoom } = rc
   const structureColor = preview.color
+  const exclusionStyle = previewUsesExteriorExclusionStyle(preview.color)
 
-  // If we have tile layout, render tile-by-tile
   if (preview.tileLayout && preview.tileLayout.tiles.length > 0) {
     const { tiles, width: layoutWidth, height: layoutHeight } = preview.tileLayout
 
-    // Track bounding box of rotated tiles for the outer border
     let minX = Infinity,
       maxX = -Infinity,
       minY = Infinity,
       maxY = -Infinity
 
     for (const tile of tiles) {
-      // Rotate tile position based on preview rotation
       const rotatedPos = rotateTilePosition(tile, preview.rotation, layoutWidth, layoutHeight)
 
-      // Update bounding box
       minX = Math.min(minX, rotatedPos.x)
       maxX = Math.max(maxX, rotatedPos.x)
       minY = Math.min(minY, rotatedPos.y)
@@ -725,27 +656,31 @@ export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
       const tileX = (preview.x + rotatedPos.x) * zoom
       const tileY = (preview.y + rotatedPos.y) * zoom
 
-      // Keep tile semantics visible even when the placement is invalid. The outer
-      // preview border communicates validity without hiding orientation details.
       if (tile.type === 'construction') {
-        ctx.fillStyle = hslToHsla(structureColor, 0.6)
+        ctx.fillStyle = colorWithAlpha(structureColor, 0.6)
         ctx.fillRect(tileX, tileY, zoom, zoom)
-
         ctx.strokeStyle = COLORS.structureBorder
         ctx.lineWidth = 1
         ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
       } else if (tile.type === 'blocked') {
-        ctx.fillStyle = COLORS.blockedTileFill
-        ctx.fillRect(tileX, tileY, zoom, zoom)
-
-        ctx.strokeStyle = COLORS.blockedTileBorder
-        ctx.lineWidth = 1
-        ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
-        renderBlockedTileIndicator(ctx, tileX, tileY, zoom)
+        if (exclusionStyle) {
+          ctx.fillStyle = COLORS.exclusionTileFill
+          ctx.fillRect(tileX, tileY, zoom, zoom)
+          ctx.strokeStyle = COLORS.exclusionTileBorder
+          ctx.lineWidth = 1
+          ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
+          renderExclusionTileIndicator(ctx, tileX, tileY, zoom)
+        } else {
+          ctx.fillStyle = COLORS.blockedTileFill
+          ctx.fillRect(tileX, tileY, zoom, zoom)
+          ctx.strokeStyle = COLORS.blockedTileBorder
+          ctx.lineWidth = 1
+          ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
+          renderBlockedTileIndicator(ctx, tileX, tileY, zoom)
+        }
       } else {
-        ctx.fillStyle = COLORS.accessTileFill
+        ctx.fillStyle = colorWithAlpha(structureColor, 0.46)
         ctx.fillRect(tileX, tileY, zoom, zoom)
-
         ctx.setLineDash([2, 2])
         ctx.strokeStyle = COLORS.accessTileBorder
         ctx.lineWidth = 1
@@ -755,7 +690,6 @@ export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
       }
     }
 
-    // Draw overall dashed border around the entire preview using actual rotated bounds
     const x = (preview.x + minX) * zoom
     const y = (preview.y + minY) * zoom
     const w = (maxX - minX + 1) * zoom
@@ -767,13 +701,12 @@ export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
     ctx.strokeRect(x + 1, y + 1, w - 2, h - 2)
     ctx.setLineDash([])
   } else {
-    // Fallback: simple rectangle preview (old behavior)
     const x = preview.x * zoom
     const y = preview.y * zoom
     const w = preview.width * zoom
     const h = preview.height * zoom
 
-    ctx.fillStyle = preview.isValid ? structureColor + '88' : COLORS.previewInvalid
+    ctx.fillStyle = preview.isValid ? colorWithAlpha(structureColor, 0.53) : COLORS.previewInvalid
     ctx.fillRect(x, y, w, h)
 
     ctx.setLineDash([4, 4])
@@ -784,9 +717,6 @@ export function renderPreview(rc: RenderContext, preview: PreviewInfo): void {
   }
 }
 
-/**
- * Get tile coordinates from mouse position
- */
 export function getTileFromMouse(
   canvas: HTMLCanvasElement,
   clientX: number,
@@ -799,9 +729,6 @@ export function getTileFromMouse(
   return { x, y }
 }
 
-/**
- * Render the complete scene
- */
 export function renderScene(
   rc: RenderContext,
   structures: readonly PlacedStructure[],
@@ -819,23 +746,13 @@ export function renderScene(
     renderCenterLines(rc)
   }
 
-  // Render hull tiles first (below structures)
   renderHullTiles(rc, hullTiles)
-
   renderStructures(rc, structures, catalog, visibilityState)
 
-  if (preview) {
-    renderPreview(rc, preview)
-  }
-
-  if (hullPreview) {
-    renderHullPreview(rc, hullPreview)
-  }
+  if (preview) renderPreview(rc, preview)
+  if (hullPreview) renderHullPreview(rc, hullPreview)
 }
 
-/**
- * Export canvas to PNG data URL
- */
 export function exportToPNG(
   gridSize: GridSize,
   structures: readonly PlacedStructure[],
