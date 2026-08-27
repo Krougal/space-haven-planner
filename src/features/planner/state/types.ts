@@ -147,7 +147,13 @@ export type PlannerAction =
   // Grid selection actions (Select tool)
   | { type: 'SET_SELECTED_STRUCTURES'; structureIds: readonly string[] }
   | { type: 'CLEAR_SELECTED_STRUCTURES' }
-  | { type: 'MOVE_SELECTED_STRUCTURES'; deltaX: number; deltaY: number }
+  | {
+      type: 'MOVE_SELECTED_STRUCTURES'
+      deltaX: number
+      deltaY: number
+      /** Optional target rotation when moving exactly one selected structure. */
+      rotation?: Rotation
+    }
 
   // Load user layers/groups (for project load/autosave)
   | {
