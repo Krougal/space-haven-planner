@@ -195,76 +195,69 @@ function getWallVisualKind(structureDef: StructureDef): WallVisualKind | null {
 }
 
 /**
- * Add a simple deterministic symbol over wall-family pieces so doors and windows
- * remain recognizable without requiring external icon assets. The symbol follows
- * the piece rotation.
+ * Draw the wall-family marker on the actual wall/core tile rather than at the
+ * center of the structure's full footprint. Door definitions often include
+ * access tiles, so a whole-footprint overlay made the symbol appear to float in
+ * the room instead of being part of the wall.
  */
-function renderWallFixtureOverlay(
+function renderWallFixtureTileIndicator(
   ctx: CanvasRenderingContext2D,
-  structureDef: StructureDef,
+  kind: WallVisualKind,
   rotation: Rotation,
-  baseX: number,
-  baseY: number,
-  widthPx: number,
-  heightPx: number,
+  tileX: number,
+  tileY: number,
   zoom: number
 ): void {
-  const kind = getWallVisualKind(structureDef)
-  if (!kind || kind === 'wall' || zoom < 7) return
+  if (zoom < 7) return
+  if (kind === 'wall') {
+    renderWallTileIndicator(ctx, tileX, tileY, zoom)
+    return
+  }
 
   const horizontal = rotation === 0 || rotation === 180
-  const centerX = baseX + widthPx / 2
-  const centerY = baseY + heightPx / 2
-  const inset = Math.max(2, zoom * 0.18)
+  const centerX = tileX + zoom / 2
+  const centerY = tileY + zoom / 2
+  const inset = Math.max(2, zoom * 0.16)
 
   ctx.save()
-  ctx.lineWidth = Math.max(1.5, zoom * 0.13)
   ctx.lineCap = 'round'
 
   if (kind === 'window') {
     ctx.strokeStyle = COLORS.windowMark
+    ctx.lineWidth = Math.max(1.5, zoom * 0.11)
     const separation = Math.max(2, zoom * 0.18)
     ctx.beginPath()
     if (horizontal) {
-      ctx.moveTo(baseX + inset, centerY - separation / 2)
-      ctx.lineTo(baseX + widthPx - inset, centerY - separation / 2)
-      ctx.moveTo(baseX + inset, centerY + separation / 2)
-      ctx.lineTo(baseX + widthPx - inset, centerY + separation / 2)
+      ctx.moveTo(tileX + inset, centerY - separation / 2)
+      ctx.lineTo(tileX + zoom - inset, centerY - separation / 2)
+      ctx.moveTo(tileX + inset, centerY + separation / 2)
+      ctx.lineTo(tileX + zoom - inset, centerY + separation / 2)
     } else {
-      ctx.moveTo(centerX - separation / 2, baseY + inset)
-      ctx.lineTo(centerX - separation / 2, baseY + heightPx - inset)
-      ctx.moveTo(centerX + separation / 2, baseY + inset)
-      ctx.lineTo(centerX + separation / 2, baseY + heightPx - inset)
+      ctx.moveTo(centerX - separation / 2, tileY + inset)
+      ctx.lineTo(centerX - separation / 2, tileY + zoom - inset)
+      ctx.moveTo(centerX + separation / 2, tileY + inset)
+      ctx.lineTo(centerX + separation / 2, tileY + zoom - inset)
     }
     ctx.stroke()
   } else {
+    // A door is represented as a single warm bar with a clean central opening.
+    // Keeping it inside the wall tile avoids the previous floating dumbbell icon.
     ctx.strokeStyle = COLORS.doorMark
-    const gap = Math.max(2, zoom * 0.22)
+    ctx.lineWidth = Math.max(1.5, zoom * 0.12)
+    const gap = Math.max(2, zoom * 0.18)
     ctx.beginPath()
     if (horizontal) {
-      ctx.moveTo(baseX + inset, centerY)
+      ctx.moveTo(tileX + inset, centerY)
       ctx.lineTo(centerX - gap, centerY)
       ctx.moveTo(centerX + gap, centerY)
-      ctx.lineTo(baseX + widthPx - inset, centerY)
+      ctx.lineTo(tileX + zoom - inset, centerY)
     } else {
-      ctx.moveTo(centerX, baseY + inset)
+      ctx.moveTo(centerX, tileY + inset)
       ctx.lineTo(centerX, centerY - gap)
       ctx.moveTo(centerX, centerY + gap)
-      ctx.lineTo(centerX, baseY + heightPx - inset)
+      ctx.lineTo(centerX, tileY + zoom - inset)
     }
     ctx.stroke()
-
-    // Small handle/datum mark makes doors distinguishable from a generic divider.
-    ctx.fillStyle = COLORS.doorMark
-    ctx.beginPath()
-    ctx.arc(
-      horizontal ? centerX + gap * 0.55 : centerX + Math.max(1.5, zoom * 0.09),
-      horizontal ? centerY - Math.max(1.5, zoom * 0.09) : centerY + gap * 0.55,
-      Math.max(1, zoom * 0.07),
-      0,
-      Math.PI * 2
-    )
-    ctx.fill()
   }
 
   ctx.restore()
@@ -394,7 +387,7 @@ export function renderGrid(rc: RenderContext): void {
   for (let y = 0; y <= gridSize.height; y++) {
     ctx.beginPath()
     ctx.moveTo(0, y * zoom + 0.5)
-    ctx.lineTo(gridSize.width * zoom, y * zoom + 0.5)
+    ctx.lineTo(gridSize.width * zoom, y + 0.5)
     ctx.stroke()
   }
 }
@@ -447,7 +440,7 @@ function rotateTilePosition(
  * - Access: category-color tint + slash
  * - Blocked machine body: category-color tint + X
  * - Wall category: distinct neutral wall tile
- * - Doors/windows: wall base plus a unique rotation-aware overlay
+ * - Doors/windows: unique markings drawn on the actual wall/core tile
  * - Exterior exclusion: amber hazard marking
  */
 export function renderStructure(
@@ -464,6 +457,7 @@ export function renderStructure(
   const structureColor = structureDef.color
   const exclusionStyle = usesExteriorExclusionStyle(structureDef)
   const wallStyle = usesWallStyle(structureDef)
+  const wallKind = getWallVisualKind(structureDef)
   const [width, height] = getRotatedSize(structureDef.size, structure.rotation)
 
   const baseX = structure.x * zoom
@@ -503,13 +497,13 @@ export function renderStructure(
           ctx.lineWidth = 1
           ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
           renderExclusionTileIndicator(ctx, tileX, tileY, zoom)
-        } else if (wallStyle) {
+        } else if (wallStyle && wallKind) {
           ctx.fillStyle = COLORS.wallTileFill
           ctx.fillRect(tileX, tileY, zoom, zoom)
           ctx.strokeStyle = COLORS.wallTileBorder
           ctx.lineWidth = 1
           ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
-          renderWallTileIndicator(ctx, tileX, tileY, zoom)
+          renderWallFixtureTileIndicator(ctx, wallKind, structure.rotation, tileX, tileY, zoom)
         } else {
           ctx.fillStyle = colorWithAlpha(structureColor, 0.78)
           ctx.fillRect(tileX, tileY, zoom, zoom)
@@ -518,6 +512,16 @@ export function renderStructure(
           ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
           renderBlockedTileIndicator(ctx, tileX, tileY, zoom)
         }
+      } else if (wallStyle && wallKind) {
+        // Some door/window definitions expose their core wall tile as
+        // `construction` rather than `blocked`. Style those exactly like the
+        // blocked wall tiles so the fixture never disappears into the hull color.
+        ctx.fillStyle = COLORS.wallTileFill
+        ctx.fillRect(tileX, tileY, zoom, zoom)
+        ctx.strokeStyle = COLORS.wallTileBorder
+        ctx.lineWidth = 1
+        ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
+        renderWallFixtureTileIndicator(ctx, wallKind, structure.rotation, tileX, tileY, zoom)
       } else {
         ctx.fillStyle = structureColor
         ctx.fillRect(tileX, tileY, zoom, zoom)
@@ -526,6 +530,13 @@ export function renderStructure(
         ctx.strokeRect(tileX + 0.5, tileY + 0.5, zoom - 1, zoom - 1)
       }
     }
+  } else if (wallStyle && wallKind) {
+    ctx.fillStyle = COLORS.wallTileFill
+    ctx.fillRect(baseX, baseY, w, h)
+    ctx.strokeStyle = COLORS.wallTileBorder
+    ctx.lineWidth = 1
+    ctx.strokeRect(baseX + 0.5, baseY + 0.5, w - 1, h - 1)
+    renderWallFixtureTileIndicator(ctx, wallKind, structure.rotation, baseX, baseY, Math.min(w, h))
   } else {
     ctx.fillStyle = structureColor
     ctx.fillRect(baseX, baseY, w, h)
@@ -533,8 +544,6 @@ export function renderStructure(
     ctx.lineWidth = 1
     ctx.strokeRect(baseX + 0.5, baseY + 0.5, w - 1, h - 1)
   }
-
-  renderWallFixtureOverlay(ctx, structureDef, structure.rotation, baseX, baseY, w, h, zoom)
 
   const hullRelatedNames = ['wall', 'door', 'window', 'hull']
   const isHullRelated = hullRelatedNames.some((name) =>
