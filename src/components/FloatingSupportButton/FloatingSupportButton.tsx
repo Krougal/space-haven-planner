@@ -49,7 +49,7 @@ export function FloatingSupportButton() {
   const coffeeLabel = isPulsing && pulseIdx >= 0 ? PULSE_LABELS[pulseIdx] : DEFAULT_COFFEE_LABEL
 
   return (
-    <>
+    <div className={styles.buttonGroup}>
       <a
         href={CANNY_URL}
         target="_blank"
@@ -78,6 +78,6 @@ export function FloatingSupportButton() {
         </span>
         <span className={styles.label}>{coffeeLabel}</span>
       </a>
-    </>
+    </div>
   )
 }
