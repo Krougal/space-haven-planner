@@ -294,6 +294,49 @@ function getStructureTiles(
 }
 
 /**
+ * Check whether the part of a structure that must physically remain on the
+ * planner canvas is within bounds.
+ *
+ * Normal structures retain the historical bounding-box rule. Structures whose
+ * `blocked` tiles represent exterior/reserved clearance are different: only
+ * their solid/body and crew-access tiles must remain on-grid. Their exclusion
+ * tiles may extend beyond any canvas edge, matching the in-game space outside
+ * the ship hull.
+ */
+function isStructureWithinGrid(
+  state: PlannerState,
+  structureDef: StructureDef,
+  x: number,
+  y: number,
+  rotation: Rotation
+): boolean {
+  if (!usesExteriorExclusionStyle(structureDef) || !structureDef.tileLayout) {
+    const [width, height] = getRotatedSize(structureDef.size, rotation)
+    return (
+      x >= 0 &&
+      y >= 0 &&
+      x + width <= state.gridSize.width &&
+      y + height <= state.gridSize.height
+    )
+  }
+
+  const tiles = getStructureTiles(structureDef, x, y, rotation)
+  for (const key of [...tiles.blocking, ...tiles.access]) {
+    const { x: tileX, y: tileY } = parseHullTileKey(key)
+    if (
+      tileX < 0 ||
+      tileY < 0 ||
+      tileX >= state.gridSize.width ||
+      tileY >= state.gridSize.height
+    ) {
+      return false
+    }
+  }
+
+  return true
+}
+
+/**
  * Check if a structure at given position overlaps with existing structures.
  *
  * Collision rules:
@@ -735,14 +778,14 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
       const found = findStructureById(state.catalog, action.structure.structureId)
       if (!found) return state
 
-      const [width, height] = getRotatedSize(found.structure.size, action.structure.rotation)
-
-      // Bounds check
       if (
-        action.structure.x < 0 ||
-        action.structure.y < 0 ||
-        action.structure.x + width > state.gridSize.width ||
-        action.structure.y + height > state.gridSize.height
+        !isStructureWithinGrid(
+          state,
+          found.structure,
+          action.structure.x,
+          action.structure.y,
+          action.structure.rotation
+        )
       ) {
         return state
       }
@@ -1090,15 +1133,8 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
         const newY = struct.y + deltaY
         const targetRotation =
           isSingleSelection && rotation !== undefined ? rotation : struct.rotation
-        const [width, height] = getRotatedSize(found.structure.size, targetRotation)
 
-        // Bounds check
-        if (
-          newX < 0 ||
-          newY < 0 ||
-          newX + width > state.gridSize.width ||
-          newY + height > state.gridSize.height
-        ) {
+        if (!isStructureWithinGrid(state, found.structure, newX, newY, targetRotation)) {
           return state // Invalid move - cancel
         }
 
@@ -1217,10 +1253,7 @@ export function canPlaceAt(
   const found = findStructureById(state.catalog, structureId)
   if (!found) return false
 
-  const [width, height] = getRotatedSize(found.structure.size, rotation)
-
-  // Bounds check
-  if (x < 0 || y < 0 || x + width > state.gridSize.width || y + height > state.gridSize.height) {
+  if (!isStructureWithinGrid(state, found.structure, x, y, rotation)) {
     return false
   }
 
