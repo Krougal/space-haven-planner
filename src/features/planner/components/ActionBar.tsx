@@ -13,6 +13,7 @@ import {
   deserializeUserLayers,
   deserializeUserGroups,
   DEFAULT_PROJECT_NAME,
+  buildProjectFilename,
 } from '@/lib/serialization'
 import { clearJarCatalogCache } from '@/data/jarCatalog'
 import { capture } from '@/lib/analytics'
@@ -199,11 +200,13 @@ export function ActionBar() {
         { userLayers: state.userLayers, userGroups: state.userGroups },
         EXPORT_SCALE
       )
-      downloadDataURL(dataURL, 'spacehaven-ship.png')
+      const pngFilename = buildProjectFilename(projectMetadata).replace(/\.json$/, '.png')
+      downloadDataURL(dataURL, pngFilename)
       capture('export_png_success', {
         structures_count: state.structures.length,
         hull_tiles_count: state.hullTiles.size,
         preset: state.presetLabel,
+        revision: projectMetadata.revision,
       })
     } catch (err) {
       console.error('Failed to export PNG:', err)
@@ -211,6 +214,7 @@ export function ActionBar() {
       capture('export_png_error')
     }
   }, [
+    projectMetadata,
     state.gridSize,
     state.structures,
     state.hullTiles,
