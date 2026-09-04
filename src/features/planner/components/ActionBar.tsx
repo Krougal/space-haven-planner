@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState } from 'react'
+import { useRef, useCallback, useState, useEffect } from 'react'
 import { usePlanner } from '../state'
 import { exportToPNG } from '../canvas'
 import { clearAutosave, useJarImport } from '../hooks'
@@ -12,12 +12,51 @@ import {
   deserializeHullTiles,
   deserializeUserLayers,
   deserializeUserGroups,
+  DEFAULT_PROJECT_NAME,
 } from '@/lib/serialization'
 import { clearJarCatalogCache } from '@/data/jarCatalog'
 import { capture } from '@/lib/analytics'
 import { JarImportDialog } from './JarImportDialog'
 import { ConfirmDialog } from './ConfirmDialog'
 import styles from './ActionBar.module.css'
+
+const PROJECT_METADATA_STORAGE_KEY = 'space-haven-planner-project-metadata'
+
+interface ProjectMetadataState {
+  projectName: string
+  revision: number
+}
+
+function loadProjectMetadata(): ProjectMetadataState {
+  try {
+    const stored = localStorage.getItem(PROJECT_METADATA_STORAGE_KEY)
+    if (stored) {
+      const parsed = JSON.parse(stored) as Partial<ProjectMetadataState>
+      return {
+        projectName:
+          typeof parsed.projectName === 'string' && parsed.projectName.trim()
+            ? parsed.projectName
+            : DEFAULT_PROJECT_NAME,
+        revision:
+          typeof parsed.revision === 'number' && Number.isFinite(parsed.revision)
+            ? Math.max(0, Math.floor(parsed.revision))
+            : 0,
+      }
+    }
+  } catch {
+    // Ignore invalid local metadata and fall back to defaults.
+  }
+
+  return { projectName: DEFAULT_PROJECT_NAME, revision: 0 }
+}
+
+function saveProjectMetadata(metadata: ProjectMetadataState): void {
+  try {
+    localStorage.setItem(PROJECT_METADATA_STORAGE_KEY, JSON.stringify(metadata))
+  } catch {
+    // Ignore storage errors; explicit JSON saves still contain the metadata.
+  }
+}
 
 export function ActionBar() {
   const { state, dispatch } = usePlanner()
@@ -28,11 +67,32 @@ export function ActionBar() {
     onFileInputChange: onJarInputChange,
   } = useJarImport(dispatch)
   const [isJarDialogOpen, setIsJarDialogOpen] = useState(false)
+  const [projectMetadata, setProjectMetadata] = useState<ProjectMetadataState>(loadProjectMetadata)
   const [confirmKind, setConfirmKind] = useState<
     null | 'clear_all' | 'new_project' | 'reset_catalog'
   >(null)
 
+  useEffect(() => {
+    saveProjectMetadata(projectMetadata)
+  }, [projectMetadata])
+
+  const resetProjectMetadata = useCallback(() => {
+    setProjectMetadata({ projectName: DEFAULT_PROJECT_NAME, revision: 0 })
+  }, [])
+
+  const handleProjectNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setProjectMetadata((prev) => ({ ...prev, projectName: e.target.value }))
+  }, [])
+
+  const handleProjectNameBlur = useCallback(() => {
+    setProjectMetadata((prev) => ({
+      ...prev,
+      projectName: prev.projectName.trim() || DEFAULT_PROJECT_NAME,
+    }))
+  }, [])
+
   const handleSave = useCallback(() => {
+    const nextRevision = projectMetadata.revision + 1
     const project = createProjectFile(
       state.gridSize,
       state.presetLabel,
@@ -40,15 +100,22 @@ export function ActionBar() {
       state.hullTiles,
       state.userLayers,
       state.userGroups,
-      state.activeLayerId
+      state.activeLayerId,
+      {
+        projectName: projectMetadata.projectName,
+        revision: nextRevision,
+      }
     )
     downloadProjectJSON(project)
+    setProjectMetadata({ projectName: project.projectName, revision: project.revision })
     capture('project_save_json', {
       structures_count: state.structures.length,
       hull_tiles_count: state.hullTiles.size,
       preset: state.presetLabel,
+      revision: project.revision,
     })
   }, [
+    projectMetadata,
     state.gridSize,
     state.presetLabel,
     state.structures,
@@ -94,10 +161,17 @@ export function ActionBar() {
           activeLayerId: project.activeLayerId,
         })
 
+        // v5+ files carry their own name/revision. Older files parse to safe defaults.
+        setProjectMetadata({
+          projectName: project.projectName,
+          revision: project.revision,
+        })
+
         capture('project_load_success', {
           structures_count: structures.length,
           hull_tiles_count: hullTiles.length,
           preset: project.preset,
+          revision: project.revision,
         })
       } catch (err) {
         console.error('Failed to load project:', err)
@@ -147,23 +221,24 @@ export function ActionBar() {
     if (!hasAnything) return
 
     setConfirmKind('clear_all')
-  }, [state.structures.length, state.hullTiles.size, dispatch])
+  }, [state.structures.length, state.hullTiles.size])
 
   const handleNewProject = useCallback(() => {
     const hasAnything = state.structures.length > 0 || state.hullTiles.size > 0
     if (!hasAnything) {
       dispatch({ type: 'NEW_PROJECT' })
       clearAutosave()
+      resetProjectMetadata()
       capture('project_new')
       return
     }
 
     setConfirmKind('new_project')
-  }, [state.structures.length, state.hullTiles.size, dispatch])
+  }, [state.structures.length, state.hullTiles.size, dispatch, resetProjectMetadata])
 
   const handleResetCatalog = useCallback(() => {
     setConfirmKind('reset_catalog')
-  }, [dispatch])
+  }, [])
 
   const handleCloseConfirm = useCallback(() => {
     setConfirmKind(null)
@@ -179,6 +254,7 @@ export function ActionBar() {
     if (confirmKind === 'new_project') {
       dispatch({ type: 'NEW_PROJECT' })
       clearAutosave()
+      resetProjectMetadata()
       capture('project_new')
       return
     }
@@ -188,7 +264,7 @@ export function ActionBar() {
       dispatch({ type: 'RESET_TO_BUILTIN_CATALOG' })
       capture('catalog_reset')
     }
-  }, [confirmKind, dispatch])
+  }, [confirmKind, dispatch, resetProjectMetadata])
 
   const confirmTitle =
     confirmKind === 'clear_all'
@@ -246,6 +322,25 @@ export function ActionBar() {
         onChange={onJarInputChange}
         style={{ display: 'none' }}
       />
+
+      <div className={styles.projectMeta}>
+        <label className={styles.projectLabel} htmlFor="project-name">
+          Plan:
+        </label>
+        <input
+          id="project-name"
+          className={styles.projectNameInput}
+          type="text"
+          value={projectMetadata.projectName}
+          onChange={handleProjectNameChange}
+          onBlur={handleProjectNameBlur}
+          aria-label="Project name"
+          title="Saved JSON files use this name plus an incrementing revision"
+        />
+        <span className={styles.revisionLabel} title="Last saved revision">
+          v{String(projectMetadata.revision).padStart(3, '0')}
+        </span>
+      </div>
 
       <div className={styles.group}>
         <button className={styles.button} onClick={handleNewProject}>
