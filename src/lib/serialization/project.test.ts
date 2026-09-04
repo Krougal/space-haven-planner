@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   PROJECT_VERSION,
+  DEFAULT_PROJECT_NAME,
+  buildProjectFilename,
   parseProjectFile,
   createProjectFile,
   serializeStructures,
@@ -13,9 +15,42 @@ import {
 import type { PlacedStructure, UserLayer, UserGroup, LayerId } from '@/data/types'
 
 describe('Project Serialization', () => {
-  describe('Version 4 Format', () => {
-    it('should have PROJECT_VERSION = 4', () => {
-      expect(PROJECT_VERSION).toBe(4)
+  describe('Version 5 Format', () => {
+    it('should have PROJECT_VERSION = 5', () => {
+      expect(PROJECT_VERSION).toBe(5)
+    })
+
+    it('should serialize project name and revision metadata', () => {
+      const project = createProjectFile(
+        { width: 27, height: 27 },
+        '1x1',
+        [],
+        new Set(),
+        undefined,
+        undefined,
+        undefined,
+        { projectName: 'Larissa Stage 0', revision: 7 }
+      )
+
+      expect(project.projectName).toBe('Larissa Stage 0')
+      expect(project.revision).toBe(7)
+      expect(buildProjectFilename(project)).toBe('Larissa-Stage-0-v007.json')
+    })
+
+    it('should sanitize invalid filename characters without changing stored project name', () => {
+      const project = createProjectFile(
+        { width: 27, height: 27 },
+        '1x1',
+        [],
+        new Set(),
+        undefined,
+        undefined,
+        undefined,
+        { projectName: 'Larissa: Stage / 0', revision: 1 }
+      )
+
+      expect(project.projectName).toBe('Larissa: Stage / 0')
+      expect(buildProjectFilename(project)).toBe('Larissa-Stage-0-v001.json')
     })
 
     it('should serialize and deserialize structures with org IDs', () => {
@@ -104,15 +139,43 @@ describe('Project Serialization', () => {
 
       const project = createProjectFile(gridSize, 'Custom', structures, hullTiles, layers, groups)
 
-      expect(project.version).toBe(4)
+      expect(project.version).toBe(5)
+      expect(project.projectName).toBe(DEFAULT_PROJECT_NAME)
+      expect(project.revision).toBe(0)
       expect(project.userLayers).toBeDefined()
       expect(project.userLayers?.length).toBe(1)
       expect(project.userGroups).toBeDefined()
       expect(project.structures[0].orgLayerId).toBe('layer-systems')
     })
+
+    it('should preserve v5 metadata when parsing', () => {
+      const project = parseProjectFile({
+        version: 5,
+        projectName: 'Larissa Stage 2',
+        revision: 12,
+        gridSize: { width: 27, height: 54 },
+        preset: '1x2',
+        structures: [],
+      })
+
+      expect(project.projectName).toBe('Larissa Stage 2')
+      expect(project.revision).toBe(12)
+    })
   })
 
-  describe('Migration from v3 and earlier', () => {
+  describe('Migration from v4 and earlier', () => {
+    it('should give pre-v5 projects safe metadata defaults', () => {
+      const project = parseProjectFile({
+        version: 4,
+        gridSize: { width: 27, height: 27 },
+        preset: '1x1',
+        structures: [],
+      })
+
+      expect(project.projectName).toBe(DEFAULT_PROJECT_NAME)
+      expect(project.revision).toBe(0)
+    })
+
     it('should migrate v3 structures without org IDs', () => {
       const v3Data = {
         version: 3,
@@ -136,8 +199,8 @@ describe('Project Serialization', () => {
 
       const project = parseProjectFile(v3Data)
 
-      // Should be upgraded to v4
-      expect(project.version).toBe(4)
+      // Should be upgraded to the current format
+      expect(project.version).toBe(5)
 
       // Structures should NOT have org IDs in the parsed file
       // (they will be migrated during deserialize)

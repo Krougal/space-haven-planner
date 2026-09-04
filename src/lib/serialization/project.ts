@@ -9,13 +9,23 @@ import type {
 } from '@/data/types'
 
 /** Current project file format version */
-export const PROJECT_VERSION = 4
+export const PROJECT_VERSION = 5
+
+/** Default name for projects that predate named saves */
+export const DEFAULT_PROJECT_NAME = 'Untitled Ship'
+
+export interface ProjectMetadata {
+  projectName?: string
+  revision?: number
+}
 
 /**
  * Project file format for JSON save/load
  */
 export interface ProjectFile {
   version: number
+  projectName: string
+  revision: number
   gridSize: GridSize
   preset: string
   structures: SerializedStructure[]
@@ -72,6 +82,32 @@ export interface SerializedStructure {
   // v4+ fields for CAD-style organization
   orgLayerId?: string
   orgGroupId?: string | null
+}
+
+function normalizeProjectName(name: unknown): string {
+  if (typeof name !== 'string') return DEFAULT_PROJECT_NAME
+  const trimmed = name.trim()
+  return trimmed || DEFAULT_PROJECT_NAME
+}
+
+function normalizeRevision(revision: unknown): number {
+  if (typeof revision !== 'number' || !Number.isFinite(revision) || revision < 0) return 0
+  return Math.floor(revision)
+}
+
+/**
+ * Build a deterministic download filename from project metadata.
+ * Browser-added "(1)" suffixes are intentionally not used as versioning.
+ */
+export function buildProjectFilename(project: Pick<ProjectFile, 'projectName' | 'revision'>): string {
+  const safeName = normalizeProjectName(project.projectName)
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[.\s-]+|[.\s-]+$/g, '')
+  const baseName = safeName || 'spacehaven-ship'
+  const revision = String(normalizeRevision(project.revision)).padStart(3, '0')
+  return `${baseName}-v${revision}.json`
 }
 
 /**
@@ -227,10 +263,13 @@ export function createProjectFile(
   hullTiles: ReadonlySet<string>,
   userLayers?: readonly UserLayer[],
   userGroups?: readonly UserGroup[],
-  activeLayerId?: string | null
+  activeLayerId?: string | null,
+  metadata: ProjectMetadata = {}
 ): ProjectFile {
   return {
     version: PROJECT_VERSION,
+    projectName: normalizeProjectName(metadata.projectName),
+    revision: normalizeRevision(metadata.revision),
     gridSize,
     preset,
     structures: serializeStructures(structures),
@@ -273,6 +312,10 @@ export function parseProjectFile(data: unknown): ProjectFile {
   if (!Array.isArray(obj.structures)) {
     throw new Error('Invalid project file: structures is not an array')
   }
+
+  // v5+ project metadata; older files get safe defaults
+  const projectName = normalizeProjectName(obj.projectName)
+  const revision = normalizeRevision(obj.revision)
 
   // Migrate from v1 to v2 if needed, and add v4 org fields
   const structures: SerializedStructure[] = obj.structures.map((s: unknown) => {
@@ -362,6 +405,8 @@ export function parseProjectFile(data: unknown): ProjectFile {
 
   return {
     version: PROJECT_VERSION,
+    projectName,
+    revision,
     gridSize: {
       width: gridSize.width as number,
       height: gridSize.height as number,
@@ -377,7 +422,7 @@ export function parseProjectFile(data: unknown): ProjectFile {
 /**
  * Download a project as JSON file
  */
-export function downloadProjectJSON(project: ProjectFile, filename = 'spacehaven-ship.json'): void {
+export function downloadProjectJSON(project: ProjectFile, filename = buildProjectFilename(project)): void {
   const json = JSON.stringify(project, null, 2)
   const blob = new Blob([json], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
