@@ -81,7 +81,11 @@ export function ActionBar() {
   }, [])
 
   const handleProjectNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    setProjectMetadata((prev) => ({ ...prev, projectName: e.target.value }))
+    const projectName = e.target.value
+    setProjectMetadata((prev) => ({
+      projectName,
+      revision: projectName === prev.projectName ? prev.revision : 0,
+    }))
   }, [])
 
   const handleProjectNameBlur = useCallback(() => {
