@@ -15,6 +15,14 @@ import {
   DEFAULT_PROJECT_NAME,
   buildProjectFilename,
 } from '@/lib/serialization'
+import {
+  chooseExportDirectory,
+  dataURLToBlob,
+  isExportDirectorySupported,
+  loadExportDirectory,
+  writeExportFile,
+  type ExportDirectoryHandle,
+} from '@/lib/exportDestination'
 import { clearJarCatalogCache } from '@/data/jarCatalog'
 import { capture } from '@/lib/analytics'
 import { JarImportDialog } from './JarImportDialog'
@@ -69,13 +77,29 @@ export function ActionBar() {
   } = useJarImport(dispatch)
   const [isJarDialogOpen, setIsJarDialogOpen] = useState(false)
   const [projectMetadata, setProjectMetadata] = useState<ProjectMetadataState>(loadProjectMetadata)
+  const [exportDirectory, setExportDirectory] = useState<ExportDirectoryHandle | null>(null)
   const [confirmKind, setConfirmKind] = useState<
     null | 'clear_all' | 'new_project' | 'reset_catalog'
   >(null)
+  const exportDirectorySupported = isExportDirectorySupported()
 
   useEffect(() => {
     saveProjectMetadata(projectMetadata)
   }, [projectMetadata])
+
+  useEffect(() => {
+    let cancelled = false
+
+    void loadExportDirectory().then((handle) => {
+      if (!cancelled) {
+        setExportDirectory(handle)
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const resetProjectMetadata = useCallback(() => {
     setProjectMetadata({ projectName: DEFAULT_PROJECT_NAME, revision: 0 })
@@ -96,7 +120,41 @@ export function ActionBar() {
     }))
   }, [])
 
-  const handleSave = useCallback(() => {
+  const saveBlobToExportDirectory = useCallback(
+    async (filename: string, blob: Blob): Promise<boolean> => {
+      if (!exportDirectory) return false
+
+      try {
+        const written = await writeExportFile(exportDirectory, filename, blob)
+        if (!written) {
+          alert('Export folder permission was not granted. The file will be downloaded instead.')
+        }
+        return written
+      } catch (err) {
+        console.error('Failed to write to export folder:', err)
+        alert('Could not write to the selected export folder. The file will be downloaded instead.')
+        return false
+      }
+    },
+    [exportDirectory]
+  )
+
+  const handleChooseExportDirectory = useCallback(async () => {
+    try {
+      const handle = await chooseExportDirectory()
+      if (!handle) return
+
+      setExportDirectory(handle)
+      capture('export_folder_selected')
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+
+      console.error('Failed to select export folder:', err)
+      alert('Failed to select export folder')
+    }
+  }, [])
+
+  const handleSave = useCallback(async () => {
     const nextRevision = projectMetadata.revision + 1
     const project = createProjectFile(
       state.gridSize,
@@ -111,16 +169,26 @@ export function ActionBar() {
         revision: nextRevision,
       }
     )
-    downloadProjectJSON(project)
+    const filename = buildProjectFilename(project)
+    const json = JSON.stringify(project, null, 2)
+    const blob = new Blob([json], { type: 'application/json' })
+    const savedToFolder = await saveBlobToExportDirectory(filename, blob)
+
+    if (!savedToFolder) {
+      downloadProjectJSON(project, filename)
+    }
+
     setProjectMetadata({ projectName: project.projectName, revision: project.revision })
     capture('project_save_json', {
       structures_count: state.structures.length,
       hull_tiles_count: state.hullTiles.size,
       preset: state.presetLabel,
       revision: project.revision,
+      destination: savedToFolder ? 'folder' : 'download',
     })
   }, [
     projectMetadata,
+    saveBlobToExportDirectory,
     state.gridSize,
     state.presetLabel,
     state.structures,
@@ -190,7 +258,7 @@ export function ActionBar() {
     [dispatch]
   )
 
-  const handleExportPNG = useCallback(() => {
+  const handleExportPNG = useCallback(async () => {
     try {
       const dataURL = exportToPNG(
         state.gridSize,
@@ -201,12 +269,20 @@ export function ActionBar() {
         EXPORT_SCALE
       )
       const pngFilename = buildProjectFilename(projectMetadata).replace(/\.json$/, '.png')
-      downloadDataURL(dataURL, pngFilename)
+      const savedToFolder = exportDirectory
+        ? await saveBlobToExportDirectory(pngFilename, dataURLToBlob(dataURL))
+        : false
+
+      if (!savedToFolder) {
+        downloadDataURL(dataURL, pngFilename)
+      }
+
       capture('export_png_success', {
         structures_count: state.structures.length,
         hull_tiles_count: state.hullTiles.size,
         preset: state.presetLabel,
         revision: projectMetadata.revision,
+        destination: savedToFolder ? 'folder' : 'download',
       })
     } catch (err) {
       console.error('Failed to export PNG:', err)
@@ -214,7 +290,9 @@ export function ActionBar() {
       capture('export_png_error')
     }
   }, [
+    exportDirectory,
     projectMetadata,
+    saveBlobToExportDirectory,
     state.gridSize,
     state.structures,
     state.hullTiles,
@@ -366,6 +444,31 @@ export function ActionBar() {
         <button className={styles.button} onClick={handleExportPNG}>
           🖼️ Export PNG
         </button>
+      </div>
+
+      <div className={styles.group}>
+        <button
+          className={styles.button}
+          onClick={handleChooseExportDirectory}
+          disabled={!exportDirectorySupported}
+          title={
+            exportDirectorySupported
+              ? 'Choose a local folder for JSON and PNG exports'
+              : 'Folder export is not supported by this browser; files will use Downloads'
+          }
+        >
+          📁 {exportDirectory ? 'Change Export Folder' : 'Choose Export Folder'}
+        </button>
+        <span
+          className={styles.projectLabel}
+          title={
+            exportDirectory
+              ? 'Exports are written directly to this authorized folder'
+              : 'Exports use the browser Downloads folder'
+          }
+        >
+          {exportDirectory?.name ?? 'Downloads'}
+        </span>
       </div>
 
       <div className={styles.group}>
