@@ -7,14 +7,18 @@ import { CanvasViewport as BaseCanvasViewport } from './CanvasViewport'
  * CanvasViewport intentionally works in tile coordinates that may become negative
  * for hull-edge structures whose exterior exclusion zones extend off-grid. Its
  * existing React mouse handlers stop receiving movement as soon as the pointer
- * leaves the canvas, though. This wrapper keeps forwarding an active mouse drag
+ * leaves the canvas, though. This bridge keeps forwarding an active mouse drag
  * back to that canvas until mouse-up so those negative coordinates are reachable.
+ *
+ * The marker is a sibling of BaseCanvasViewport instead of a wrapper around it.
+ * CanvasViewport relies on its direct parent being the scroll container for pan
+ * and zoom behavior, so inserting a wrapper here would silently break panning.
  */
 export function CanvasViewport() {
-  const rootRef = useRef<HTMLDivElement>(null)
+  const rootMarkerRef = useRef<HTMLSpanElement>(null)
 
   useEffect(() => {
-    const root = rootRef.current
+    const root = rootMarkerRef.current?.parentElement
     if (!root) return
 
     let activeCanvas: HTMLCanvasElement | null = null
@@ -109,8 +113,9 @@ export function CanvasViewport() {
   }, [])
 
   return (
-    <div ref={rootRef} style={{ display: 'contents' }}>
+    <>
+      <span ref={rootMarkerRef} aria-hidden="true" style={{ display: 'none' }} />
       <BaseCanvasViewport />
-    </div>
+    </>
   )
 }
