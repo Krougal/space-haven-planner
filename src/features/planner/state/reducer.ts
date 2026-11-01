@@ -321,6 +321,25 @@ function isStructureWithinGrid(
   }
 
   const tiles = getStructureTiles(structureDef, x, y, rotation)
+
+  // Cargo ports require shuttle clearance near the map edge. Unlike engines
+  // and airlocks, no more than two exterior exclusion tiles may overhang it.
+  const name = structureDef.name.toLowerCase()
+  if (name.includes('cargo port') || name.includes('cargo dock')) {
+    const overhang = 2
+    for (const key of tiles.exclusion) {
+      const { x: tileX, y: tileY } = parseHullTileKey(key)
+      if (
+        tileX < -overhang ||
+        tileY < -overhang ||
+        tileX >= state.gridSize.width + overhang ||
+        tileY >= state.gridSize.height + overhang
+      ) {
+        return false
+      }
+    }
+  }
+
   for (const key of [...tiles.blocking, ...tiles.access]) {
     const { x: tileX, y: tileY } = parseHullTileKey(key)
     if (
