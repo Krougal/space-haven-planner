@@ -8,6 +8,7 @@ import type {
   StructureDef,
 } from '@/data/types'
 import type { PlannerState } from './types'
+import { BUILTIN_CATALOG } from '@/data/jarCatalog/builtinSnapshot'
 
 function makeExteriorStructure(
   id: string,
@@ -42,6 +43,23 @@ function makeExteriorStructure(
 function createCatalog(): StructureCatalog {
   const airlock = makeExteriorStructure('test-airlock', 'Test Airlock', 'airlock')
   const cargoPort = makeExteriorStructure('test-cargo-port', 'Cargo Port', 'storage')
+  const longCargoPort: StructureDef = {
+    ...makeExteriorStructure('test-cargo-port-long', 'Cargo Port Long', 'storage'),
+    tileLayout: {
+      tiles: [
+        ...Array.from({ length: 4 }, (_, y) => [
+          { x: 0, y, type: 'blocked' as const, walkCost: 255 },
+          { x: 1, y, type: 'blocked' as const, walkCost: 255 },
+        ]).flat(),
+        { x: 0, y: 4, type: 'construction', walkCost: 1 },
+        { x: 1, y: 4, type: 'construction', walkCost: 1 },
+        { x: 0, y: 5, type: 'access', walkCost: 0 },
+        { x: 1, y: 5, type: 'access', walkCost: 0 },
+      ],
+      width: 2,
+      height: 6,
+    },
+  }
   const console: StructureDef = {
     id: 'test-console',
     name: 'Test Console',
@@ -68,7 +86,7 @@ function createCatalog(): StructureCatalog {
       name: 'Storage',
       defaultLayer: 'Rooms' as LayerId,
       color: '#888866',
-      items: [cargoPort],
+      items: [cargoPort, longCargoPort],
     },
     {
       id: 'system',
@@ -120,6 +138,46 @@ describe('exterior exclusion bounds', () => {
   it('recognizes cargo ports as exterior-clearance structures too', () => {
     const state = createState()
     expect(canPlaceAt(state, 'test-cargo-port', 2, -2, 0)).toBe(true)
+  })
+
+  it.each([
+    { rotation: 0, x: 2, y: -2, badX: 2, badY: -3 },
+    { rotation: 90, x: 4, y: 2, badX: 5, badY: 2 },
+    { rotation: 180, x: 2, y: 4, badX: 2, badY: 5 },
+    { rotation: 270, x: -2, y: 2, badX: -3, badY: 2 },
+  ] as const)(
+    'limits cargo port exclusion to two off-grid tiles at $rotation degrees',
+    ({ rotation, x, y, badX, badY }) => {
+      const state = createState()
+      expect(canPlaceAt(state, 'test-cargo-port-long', x, y, rotation)).toBe(true)
+      expect(canPlaceAt(state, 'test-cargo-port-long', badX, badY, rotation)).toBe(false)
+    }
+  )
+
+  it('enforces cargo port clearance on moves as well as placement', () => {
+    let state: PlannerState = {
+      ...createState(),
+      structures: [placedExterior('cargo-1', 'test-cargo-port-long', -2)],
+      selectedStructureIds: new Set(['cargo-1']),
+    }
+    const rejected = plannerReducer(state, {
+      type: 'MOVE_SELECTED_STRUCTURES',
+      deltaX: 0,
+      deltaY: -1,
+    })
+    expect(rejected.structures[0].y).toBe(-2)
+  })
+
+  it('uses the real JAR cargo port geometry at the left boundary', () => {
+    const state: PlannerState = {
+      ...createState(),
+      gridSize: { width: 32, height: 32 },
+      catalog: BUILTIN_CATALOG,
+    }
+    // At x=-2 its construction starts at x=0; one tile farther
+    // would push construction off-grid.
+    expect(canPlaceAt(state, 'mid_3543', -2, 4, 0)).toBe(true)
+    expect(canPlaceAt(state, 'mid_3543', -3, 4, 0)).toBe(false)
   })
 
   it('still rejects placement when construction or access tiles leave the grid', () => {
